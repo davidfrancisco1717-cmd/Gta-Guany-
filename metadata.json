@@ -1,0 +1,6 @@
+{
+  "name": "San Verde 3D",
+  "description": "Mundo aberto 3D jogável no navegador inspirado em GTA, com veículos conduzíveis, polícia, missões, ciclo dia-noite e controlos táteis para Android.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
