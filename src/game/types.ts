@@ -2,7 +2,9 @@ export type GraphicsQuality = 'low' | 'medium' | 'high';
 
 export type GamePhase = 'title' | 'playing' | 'paused' | 'wasted' | 'busted';
 
-export type VehicleKind = 'sports' | 'sedan' | 'suv' | 'moto' | 'van' | 'police';
+export type VehicleKind = 'camaro' | 'mustang' | 'challenger' | 'sports' | 'sedan' | 'suv' | 'moto' | 'van' | 'police';
+
+export type CameraMode = 'chase' | 'cockpit';
 
 export interface QualityConfig {
   label: string;
@@ -73,34 +75,117 @@ export interface VehicleSpec {
   halfLength: number;
   height: number;
   wheelRadius: number;
+  cockpitOffset: { x: number; y: number; z: number };
+  categoryLabel: string;
+  defaultColor: number;
 }
 
 export const VEHICLE_SPECS: Record<VehicleKind, VehicleSpec> = {
+  camaro: {
+    kind: 'camaro',
+    name: 'Camaro SS V8',
+    categoryLabel: 'Muscle Coupe',
+    defaultColor: 0xffb800,
+    maxSpeed: 44,
+    accel: 27.5,
+    brake: 33,
+    turnSpeed: 2.75,
+    grip: 7.9,
+    driftGrip: 1.55,
+    oversteerBias: 0.54,
+    gears: 6,
+    suspensionStiffness: 68,
+    suspensionDamping: 11.4,
+    suspensionTravel: 0.095,
+    rollFactor: 0.068,
+    pitchFactor: 0.056,
+    mass: 1.38,
+    halfWidth: 1.04,
+    halfLength: 2.34,
+    height: 1.35,
+    wheelRadius: 0.382,
+    cockpitOffset: { x: 0.42, y: 1.16, z: 0.04 },
+  },
+  mustang: {
+    kind: 'mustang',
+    name: 'Ford Mustang GT 5.0',
+    categoryLabel: 'Muscle Coupe',
+    defaultColor: 0xd91e18,
+    maxSpeed: 45,
+    accel: 28.5,
+    brake: 34,
+    turnSpeed: 2.82,
+    grip: 8.1,
+    driftGrip: 1.5,
+    oversteerBias: 0.56,
+    gears: 6,
+    suspensionStiffness: 70,
+    suspensionDamping: 11.6,
+    suspensionTravel: 0.09,
+    rollFactor: 0.062,
+    pitchFactor: 0.052,
+    mass: 1.36,
+    halfWidth: 0.958,
+    halfLength: 2.392,
+    height: 1.381,
+    wheelRadius: 0.343,
+    cockpitOffset: { x: 0.39, y: 1.14, z: -0.09 },
+  },
+  challenger: {
+    kind: 'challenger',
+    name: 'Dodge Challenger 2015 LB Performance',
+    categoryLabel: 'Muscle Widebody',
+    defaultColor: 0x18181b,
+    maxSpeed: 45,
+    accel: 28.5,
+    brake: 34,
+    turnSpeed: 2.75,
+    grip: 8.2,
+    driftGrip: 1.55,
+    oversteerBias: 0.55,
+    gears: 6,
+    suspensionStiffness: 68,
+    suspensionDamping: 11.6,
+    suspensionTravel: 0.088,
+    rollFactor: 0.058,
+    pitchFactor: 0.05,
+    mass: 1.48,
+    halfWidth: 1.09,
+    halfLength: 2.51,
+    height: 1.38,
+    wheelRadius: 0.368,
+    cockpitOffset: { x: 0.39, y: 1.12, z: -0.08 },
+  },
   sports: {
     kind: 'sports',
-    name: 'Comet GT',
-    maxSpeed: 42,
-    accel: 26,
+    name: 'Lexus LC 500 Convertible',
+    categoryLabel: 'GT Descapotável',
+    defaultColor: 0xb84a1e,
+    maxSpeed: 44,
+    accel: 27.5,
     brake: 34,
     turnSpeed: 2.85,
-    grip: 8.4,
-    driftGrip: 1.75,
-    oversteerBias: 0.46,
+    grip: 8.5,
+    driftGrip: 1.7,
+    oversteerBias: 0.45,
     gears: 6,
-    suspensionStiffness: 72,
-    suspensionDamping: 12.2,
+    suspensionStiffness: 70,
+    suspensionDamping: 12.0,
     suspensionTravel: 0.085,
-    rollFactor: 0.055,
-    pitchFactor: 0.048,
-    mass: 1.15,
-    halfWidth: 1.05,
-    halfLength: 2.25,
-    height: 1.32,
-    wheelRadius: 0.36,
+    rollFactor: 0.054,
+    pitchFactor: 0.046,
+    mass: 1.42,
+    halfWidth: 0.96,
+    halfLength: 2.385,
+    height: 1.35,
+    wheelRadius: 0.364,
+    cockpitOffset: { x: 0.39, y: 1.09, z: -0.08 },
   },
   sedan: {
     kind: 'sedan',
     name: 'Sultan Sedan',
+    categoryLabel: 'Berlina',
+    defaultColor: 0x2563eb,
     maxSpeed: 31,
     accel: 17.5,
     brake: 26,
@@ -119,10 +204,13 @@ export const VEHICLE_SPECS: Record<VehicleKind, VehicleSpec> = {
     halfLength: 2.2,
     height: 1.45,
     wheelRadius: 0.35,
+    cockpitOffset: { x: 0.42, y: 1.23, z: 0.05 },
   },
   suv: {
     kind: 'suv',
     name: 'Granger SUV',
+    categoryLabel: 'Todo-o-Terreno',
+    defaultColor: 0x1e293b,
     maxSpeed: 28,
     accel: 15,
     brake: 24,
@@ -141,10 +229,13 @@ export const VEHICLE_SPECS: Record<VehicleKind, VehicleSpec> = {
     halfLength: 2.35,
     height: 1.78,
     wheelRadius: 0.42,
+    cockpitOffset: { x: 0.44, y: 1.42, z: 0.08 },
   },
   moto: {
     kind: 'moto',
     name: 'Bati 801',
+    categoryLabel: 'Superbike',
+    defaultColor: 0xf97316,
     maxSpeed: 44,
     accel: 29,
     brake: 32,
@@ -163,10 +254,13 @@ export const VEHICLE_SPECS: Record<VehicleKind, VehicleSpec> = {
     halfLength: 1.15,
     height: 1.15,
     wheelRadius: 0.32,
+    cockpitOffset: { x: 0.0, y: 1.24, z: 0.14 },
   },
   van: {
     kind: 'van',
     name: 'Speedo Cargo',
+    categoryLabel: 'Comercial',
+    defaultColor: 0xf1f5f9,
     maxSpeed: 24,
     accel: 12.5,
     brake: 21,
@@ -185,10 +279,13 @@ export const VEHICLE_SPECS: Record<VehicleKind, VehicleSpec> = {
     halfLength: 2.55,
     height: 2.1,
     wheelRadius: 0.38,
+    cockpitOffset: { x: 0.44, y: 1.56, z: 0.55 },
   },
   police: {
     kind: 'police',
     name: 'Viatura LSPD',
+    categoryLabel: 'Polícia',
+    defaultColor: 0x0f172a,
     maxSpeed: 38,
     accel: 22.5,
     brake: 31,
@@ -199,7 +296,7 @@ export const VEHICLE_SPECS: Record<VehicleKind, VehicleSpec> = {
     gears: 5,
     suspensionStiffness: 64,
     suspensionDamping: 11.2,
-    suspensionTravel: 0.10,
+    suspensionTravel: 0.1,
     rollFactor: 0.068,
     pitchFactor: 0.056,
     mass: 1.5,
@@ -207,6 +304,7 @@ export const VEHICLE_SPECS: Record<VehicleKind, VehicleSpec> = {
     halfLength: 2.28,
     height: 1.52,
     wheelRadius: 0.36,
+    cockpitOffset: { x: 0.42, y: 1.26, z: 0.05 },
   },
 };
 
@@ -276,10 +374,36 @@ export interface InteractiveZone {
   radius: number;
 }
 
+export interface VehicleCatalogItem {
+  id: string;
+  kind: VehicleKind;
+  name: string;
+  category: string;
+  description: string;
+  defaultColor: string;
+  previewUrl: string | null;
+  modelUrl: string | null;
+  orientationOffsetY?: number;
+  targetLength?: number;
+  cockpitOffset?: { x: number; y: number; z: number };
+  wheelNames?: string[];
+}
+
+export interface SavedVehicleEntry {
+  slotId: string;
+  catalogId: string;
+  kind: VehicleKind;
+  name: string;
+  color: number;
+  health: number;
+  savedAtLabel: string;
+  customModelUrl?: string;
+}
+
 export interface MinimapEntity {
   x: number;
   z: number;
-  kind: 'traffic' | 'police' | 'parked' | 'mission' | 'target' | 'gas' | 'shop' | 'checkpoint';
+  kind: 'traffic' | 'police' | 'parked' | 'mission' | 'target' | 'gas' | 'shop' | 'garage' | 'checkpoint';
   heading?: number;
 }
 
@@ -297,6 +421,15 @@ export interface HudSnapshot {
   vehicleName: string;
   speedKmh: number;
   vehicleHealth: number;
+  vehicleGear: number;
+  vehicleRpm: number;
+  isDrifting: boolean;
+  isReversing: boolean;
+  cameraMode: CameraMode;
+  inGarageZone: boolean;
+  garageOpen: boolean;
+  vehicleCatalog: VehicleCatalogItem[];
+  savedVehicles: SavedVehicleEntry[];
   district: string;
   timeOfDayLabel: string;
   dayProgress: number; // 0..1

@@ -1,0 +1,14 @@
+{
+  "id": "lexus_lc500",
+  "kind": "sports",
+  "name": "Lexus LC 500 Convertible",
+  "category": "GT Descapotável",
+  "description": "Lexus LC 500 Convertible 2021 V8 5.0 com modelo 3D real, interior descapotável e rodas articuladas.",
+  "defaultColor": "#b84a1e",
+  "previewUrl": null,
+  "modelUrl": "/assets/vehicles/2021_lexus_lc_500_convertible.glb",
+  "orientationOffsetY": 0,
+  "targetLength": 4.77,
+  "cockpitOffset": { "x": 0.39, "y": 1.09, "z": -0.08 },
+  "wheelNames": ["^3dwheel", "wheel_fl", "wheel_fr", "wheel_rl", "wheel_rr"]
+}

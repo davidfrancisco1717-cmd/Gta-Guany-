@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "vehicles": [
+    "camaro_ss",
+    "mustang_gt",
+    "lexus_lc500",
+    "dodge_challenger_lb",
+    "sultan_sedan",
+    "granger_suv",
+    "speedo_cargo",
+    "bati_801",
+    "lspd_cruiser"
+  ]
+}

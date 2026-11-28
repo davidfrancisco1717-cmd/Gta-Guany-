@@ -55,13 +55,15 @@ export function buildCity(
   const trafficLights: TrafficLightNode[] = [];
   const windowMaterials: THREE.MeshStandardMaterial[] = [];
 
-  // 1. Atmospheric Gradient Sky Dome Shader
+  // 1. Atmospheric Gradient Sky Dome Shader (with Dawn/Sunset scattering & Night Stars)
   const skyUniforms = {
     uTopColor: { value: new THREE.Color(0x3a618e) },
     uHorizonColor: { value: new THREE.Color(0xf29356) },
     uSunColor: { value: new THREE.Color(0xffdca8) },
     uSunDir: { value: new THREE.Vector3(0.6, 0.25, 0.4).normalize() },
     uSunGlow: { value: 1.0 },
+    uNightFactor: { value: 0.0 },
+    uTime: { value: 0.0 },
   };
   const skyDome = new THREE.Mesh(
     new THREE.SphereGeometry(520, 24, 16),
@@ -84,13 +86,32 @@ export function buildCity(
         uniform vec3 uSunColor;
         uniform vec3 uSunDir;
         uniform float uSunGlow;
+        uniform float uNightFactor;
+        uniform float uTime;
         varying vec3 vWorldDir;
+
+        float hashStar(vec3 p) {
+          p = fract(p * 0.3183099 + vec3(0.1, 0.2, 0.3));
+          p *= 17.0;
+          return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+        }
+
         void main() {
           vec3 dir = normalize(vWorldDir);
           float h = clamp(dir.y * 1.35 + 0.05, 0.0, 1.0);
           vec3 col = mix(uHorizonColor, uTopColor, pow(h, 0.62));
           float sunDot = max(dot(dir, normalize(uSunDir)), 0.0);
           col += uSunColor * (pow(sunDot, 14.0) * 0.42 + pow(sunDot, 140.0) * 0.95) * uSunGlow;
+
+          if (uNightFactor > 0.02 && dir.y > 0.06) {
+            vec3 cell = floor(dir * 165.0);
+            float starVal = hashStar(cell);
+            if (starVal > 0.992) {
+              float twinkle = 0.65 + 0.35 * sin(uTime * 2.5 + starVal * 120.0);
+              float skyMask = smoothstep(0.06, 0.35, dir.y);
+              col += vec3(0.82, 0.9, 1.0) * twinkle * uNightFactor * skyMask * 0.85;
+            }
+          }
           gl_FragColor = vec4(col, 1.0);
         }
       `,
@@ -911,6 +932,51 @@ export function buildCity(
           z: bz + 1.5,
           radius: 5.5,
         });
+
+        // GARAGE & PARKING BAY (North-East quadrant of block -30, 30 -> center -18, 19)
+        const homePadGeo = attachUv2(new THREE.BoxGeometry(11, 0.04, 9));
+        const homePad = new THREE.Mesh(homePadGeo, asphaltMat);
+        homePad.position.set(bx + 12, 0.18, bz - 11);
+        homePad.receiveShadow = true;
+        group.add(homePad);
+
+        for (const sx of [-3.2, 0, 3.2]) {
+          const line = new THREE.Mesh(new THREE.PlaneGeometry(0.16, 4.8), yellowLineMat);
+          line.rotation.x = -Math.PI / 2;
+          line.position.set(bx + 12 + sx, 0.21, bz - 11);
+          group.add(line);
+        }
+
+        const garagePylon = new THREE.Mesh(new THREE.BoxGeometry(0.45, 2.8, 0.45), trimMetalMat);
+        garagePylon.position.set(bx + 16.8, 1.56, bz - 15.0);
+        garagePylon.castShadow = true;
+        const garageBeacon = new THREE.Mesh(
+          new THREE.BoxGeometry(1.1, 0.7, 0.55),
+          new THREE.MeshStandardMaterial({
+            color: 0x8b5cf6,
+            emissive: 0x7c3aed,
+            emissiveIntensity: 0.9,
+          }),
+        );
+        garageBeacon.position.set(bx + 16.8, 3.15, bz - 15.0);
+        group.add(garagePylon, garageBeacon);
+        colliders.push({
+          minX: bx + 16.4,
+          maxX: bx + 17.2,
+          minZ: bz - 15.4,
+          maxZ: bz - 14.6,
+          maxY: 3.5,
+          tag: 'prop',
+        });
+
+        interactiveZones.push({
+          id: 'garage_home',
+          kind: 'garage',
+          label: 'Garagem & Estacionamento (Guardar / Selecionar Veículo)',
+          x: bx + 12,
+          z: bz - 11,
+          radius: 6.5,
+        });
       } else if (bx === 90 && bz === -30) {
         // PARKING LOT & GARAGE + OCEAN VIEW COASTAL HOTEL
         const lotGeo = attachUv2(new THREE.BoxGeometry(42, 0.04, 42));
@@ -942,10 +1008,10 @@ export function buildCity(
         interactiveZones.push({
           id: 'garage_1',
           kind: 'garage',
-          label: 'Garagem Central (Reparar Veículo $50)',
+          label: 'Garagem Central (Guardar / Selecionar Veículo)',
           x: bx + 2,
           z: bz + 10,
-          radius: 6.5,
+          radius: 6.8,
         });
       } else if (bx === 90 && bz === -90) {
         // POLICE PRECINCT
@@ -1547,23 +1613,27 @@ export function buildCity(
   scene.background = sunsetHorizon.clone();
   scene.fog = new THREE.FogExp2(0xf29356, 0.0026);
 
+  let currentShadowSpan = 88;
+  let currentShadowMapSize = shadowMapSize;
+
   const setQuality = (q: GraphicsQuality, allowShadows: boolean) => {
     const isLow = q === 'low';
+    const qCfg = QUALITY_PRESETS[q];
     detailPropsGroup.visible = !isLow;
     trunkInst.castShadow = allowShadows && !isLow;
     canopyInst.castShadow = allowShadows && !isLow;
     if (pTrunkInst) pTrunkInst.castShadow = allowShadows && !isLow;
     if (pFrondInst) pFrondInst.castShadow = allowShadows && !isLow;
     if (scene.fog instanceof THREE.FogExp2) {
-      scene.fog.density = isLow ? 0.0036 : q === 'medium' ? 0.0026 : 0.002;
+      scene.fog.density = isLow ? 0.0036 : q === 'medium' ? 0.0024 : 0.0018;
     }
-    const span = isLow ? 60 : q === 'medium' ? 88 : 108;
-    sunLight.shadow.camera.left = -span;
-    sunLight.shadow.camera.right = span;
-    sunLight.shadow.camera.top = span;
-    sunLight.shadow.camera.bottom = -span;
+    currentShadowSpan = isLow ? 60 : q === 'medium' ? 88 : 108;
+    currentShadowMapSize = qCfg.shadowMapSize;
+    sunLight.shadow.camera.left = -currentShadowSpan;
+    sunLight.shadow.camera.right = currentShadowSpan;
+    sunLight.shadow.camera.top = currentShadowSpan;
+    sunLight.shadow.camera.bottom = -currentShadowSpan;
     sunLight.shadow.camera.updateProjectionMatrix();
-    void QUALITY_PRESETS[q];
   };
 
   const update = (
@@ -1579,26 +1649,29 @@ export function buildCity(
     if (sunElev > 0.28) {
       skyUniforms.uTopColor.value.copy(dayZenith);
       currentHorizon.copy(dayHorizon);
-      skyUniforms.uSunGlow.value = 0.7;
+      skyUniforms.uSunGlow.value = 0.72;
     } else if (sunElev > -0.15) {
       const t = (sunElev + 0.15) / 0.43;
       if (t > 0.5) {
         const k = (t - 0.5) * 2;
         skyUniforms.uTopColor.value.copy(sunsetZenith).lerp(dayZenith, k);
         currentHorizon.copy(sunsetHorizon).lerp(dayHorizon, k);
-        skyUniforms.uSunGlow.value = THREE.MathUtils.lerp(1.15, 0.7, k);
+        skyUniforms.uSunGlow.value = THREE.MathUtils.lerp(1.18, 0.72, k);
       } else {
         const k = t * 2;
         skyUniforms.uTopColor.value.copy(nightZenith).lerp(sunsetZenith, k);
         currentHorizon.copy(nightHorizon).lerp(sunsetHorizon, k);
-        skyUniforms.uSunGlow.value = THREE.MathUtils.lerp(0.15, 1.15, k);
+        skyUniforms.uSunGlow.value = THREE.MathUtils.lerp(0.18, 1.18, k);
       }
     } else {
       skyUniforms.uTopColor.value.copy(nightZenith);
       currentHorizon.copy(nightHorizon);
-      skyUniforms.uSunGlow.value = 0.12;
+      skyUniforms.uSunGlow.value = 0.14;
     }
 
+    const nightGlow = isNight ? 1.0 : THREE.MathUtils.clamp((0.24 - sunElev) / 0.28, 0, 1);
+    skyUniforms.uNightFactor.value = nightGlow;
+    skyUniforms.uTime.value = elapsed;
     skyUniforms.uHorizonColor.value.copy(currentHorizon);
     skyDome.position.set(playerPos.x, 0, playerPos.z);
 
@@ -1609,36 +1682,39 @@ export function buildCity(
       scene.fog.color.copy(currentHorizon);
     }
 
+    // Texel-snapped directional shadow camera follows player cleanly without shadow shimmer
     const lightDist = 110;
     const elevClamped = Math.max(0.28, Math.abs(sunElev));
     const lx = Math.cos(sunAngle) * lightDist * 0.72;
     const ly = elevClamped * lightDist;
     const lz = 45;
-    sunLight.position.set(playerPos.x + lx, ly, playerPos.z + lz);
-    sunLight.target.position.set(playerPos.x, 0, playerPos.z);
+    const texelSize = (currentShadowSpan * 2) / Math.max(256, currentShadowMapSize);
+    const snapX = Math.round(playerPos.x / texelSize) * texelSize;
+    const snapZ = Math.round(playerPos.z / texelSize) * texelSize;
+    sunLight.position.set(snapX + lx, ly, snapZ + lz);
+    sunLight.target.position.set(snapX, 0, snapZ);
     sunLight.target.updateMatrixWorld();
     sunLight.castShadow = allowShadows;
     skyUniforms.uSunDir.value.set(lx, Math.max(8, sunElev * lightDist), lz).normalize();
 
     if (!isNight) {
       const dayFactor = THREE.MathUtils.clamp((sunElev - 0.05) / 0.4, 0, 1);
-      sunLight.intensity = 1.35 + dayFactor * 1.15;
+      sunLight.intensity = 1.4 + dayFactor * 1.18;
       sunLight.color.copy(sunsetSunColor).lerp(daySunColor, dayFactor);
       skyUniforms.uSunColor.value.copy(sunLight.color);
-      hemiLight.intensity = 0.65 + dayFactor * 0.35;
-      fillLight.intensity = 0.4 + dayFactor * 0.16;
+      hemiLight.intensity = 0.68 + dayFactor * 0.36;
+      fillLight.intensity = 0.42 + dayFactor * 0.16;
     } else {
-      sunLight.intensity = 0.78;
+      sunLight.intensity = 0.82;
       sunLight.color.copy(moonColor);
       skyUniforms.uSunColor.value.copy(moonColor);
-      hemiLight.intensity = 0.46;
-      fillLight.intensity = 0.28;
+      hemiLight.intensity = 0.48;
+      fillLight.intensity = 0.3;
     }
 
-    const nightGlow = isNight ? 1.0 : THREE.MathUtils.clamp((0.24 - sunElev) / 0.28, 0, 1);
-    streetLightBulbs.emissiveIntensity = 0.25 + nightGlow * 2.4;
+    streetLightBulbs.emissiveIntensity = 0.25 + nightGlow * 2.55;
     for (let i = 0; i < windowMaterials.length; i++) {
-      windowMaterials[i].emissiveIntensity = nightGlow * 0.95;
+      windowMaterials[i].emissiveIntensity = nightGlow * 0.98;
     }
 
     textures.waterNormal.offset.x = (elapsed * 0.015) % 1;

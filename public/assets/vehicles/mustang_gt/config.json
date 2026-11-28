@@ -1,0 +1,14 @@
+{
+  "id": "mustang_gt",
+  "kind": "mustang",
+  "name": "Ford Mustang GT 5.0",
+  "category": "Muscle Coupe",
+  "description": "Fastback V8 5.0 Race Red com grelha hexagonal, capô com extratores duplos, faróis tri-bar LED e tração traseira.",
+  "defaultColor": "#D91E18",
+  "previewUrl": "/assets/aistudio/sportscarfordmustangcoupe2015_9_418f1262.webp",
+  "modelUrl": null,
+  "orientationOffsetY": 0,
+  "targetLength": 4.784,
+  "cockpitOffset": { "x": 0.39, "y": 1.14, "z": -0.09 },
+  "wheelNames": ["wheel", "roda", "tire", "tyre", "rim", "pneu", "aro", "ftire", "rtire"]
+}

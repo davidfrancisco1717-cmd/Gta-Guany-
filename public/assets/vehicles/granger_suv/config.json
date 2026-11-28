@@ -1,0 +1,14 @@
+{
+  "id": "granger_suv",
+  "kind": "suv",
+  "name": "Granger SUV",
+  "category": "Todo-o-Terreno",
+  "description": "SUV robusto com suspensão elevada, elevada massa de impacto e tração firme.",
+  "defaultColor": "#1e293b",
+  "previewUrl": null,
+  "modelUrl": null,
+  "orientationOffsetY": 0,
+  "targetLength": 4.7,
+  "cockpitOffset": { "x": 0.44, "y": 1.42, "z": 0.08 },
+  "wheelNames": ["wheel", "roda", "tire", "rim"]
+}

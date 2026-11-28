@@ -1,0 +1,14 @@
+{
+  "id": "speedo_cargo",
+  "kind": "van",
+  "name": "Speedo Cargo",
+  "category": "Carrinha Comercial",
+  "description": "Carrinha pesada de carga com suspensão macia e grande resistência.",
+  "defaultColor": "#f1f5f9",
+  "previewUrl": null,
+  "modelUrl": null,
+  "orientationOffsetY": 0,
+  "targetLength": 5.1,
+  "cockpitOffset": { "x": 0.44, "y": 1.56, "z": 0.55 },
+  "wheelNames": ["wheel", "roda", "tire", "rim"]
+}

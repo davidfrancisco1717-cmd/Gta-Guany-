@@ -2,7 +2,12 @@ export class SoundEngine {
   private ctx: AudioContext | null = null;
   private masterGain: GainNode | null = null;
   private engineOsc: OscillatorNode | null = null;
+  private engineSubOsc: OscillatorNode | null = null;
+  private engineFilter: BiquadFilterNode | null = null;
   private engineGain: GainNode | null = null;
+  private hornOscA: OscillatorNode | null = null;
+  private hornOscB: OscillatorNode | null = null;
+  private hornGain: GainNode | null = null;
   private sirenOsc: OscillatorNode | null = null;
   private sirenGain: GainNode | null = null;
   private skidGain: GainNode | null = null;
@@ -15,6 +20,7 @@ export class SoundEngine {
   public musicEnabled = true;
 
   public init(): void {
+    if (typeof window === 'undefined') return;
     if (this.ctx) {
       if (this.ctx.state === 'suspended') {
         void this.ctx.resume();
@@ -29,7 +35,7 @@ export class SoundEngine {
     this.masterGain.gain.value = this.muted ? 0 : 0.45;
     this.masterGain.connect(this.ctx.destination);
 
-    // Prebuild white noise buffer for tire skid, crashes, gunshots, and ocean breeze
+    // Prebuild white noise buffer for tire skid, crashes, gunshots, and gear shifts
     const sampleRate = this.ctx.sampleRate;
     const buffer = this.ctx.createBuffer(1, sampleRate * 1.5, sampleRate);
     const data = buffer.getChannelData(0);
@@ -38,19 +44,43 @@ export class SoundEngine {
     }
     this.noiseBuffer = buffer;
 
-    // Continuous engine oscillator (muted when on foot)
+    // Dual-oscillator engine synth with RPM-reactive lowpass filter
     this.engineOsc = this.ctx.createOscillator();
     this.engineOsc.type = 'sawtooth';
     this.engineOsc.frequency.value = 55;
-    const engineFilter = this.ctx.createBiquadFilter();
-    engineFilter.type = 'lowpass';
-    engineFilter.frequency.value = 240;
+
+    this.engineSubOsc = this.ctx.createOscillator();
+    this.engineSubOsc.type = 'triangle';
+    this.engineSubOsc.frequency.value = 28;
+
+    this.engineFilter = this.ctx.createBiquadFilter();
+    this.engineFilter.type = 'lowpass';
+    this.engineFilter.frequency.value = 260;
+
     this.engineGain = this.ctx.createGain();
     this.engineGain.gain.value = 0;
-    this.engineOsc.connect(engineFilter);
-    engineFilter.connect(this.engineGain);
+
+    this.engineOsc.connect(this.engineFilter);
+    this.engineSubOsc.connect(this.engineFilter);
+    this.engineFilter.connect(this.engineGain);
     this.engineGain.connect(this.masterGain);
     this.engineOsc.start();
+    this.engineSubOsc.start();
+
+    // Persistent clean dual-tone vehicle horn (prevents per-frame oscillator spam)
+    this.hornOscA = this.ctx.createOscillator();
+    this.hornOscB = this.ctx.createOscillator();
+    this.hornOscA.type = 'sawtooth';
+    this.hornOscB.type = 'sawtooth';
+    this.hornOscA.frequency.value = 340;
+    this.hornOscB.frequency.value = 425;
+    this.hornGain = this.ctx.createGain();
+    this.hornGain.gain.value = 0;
+    this.hornOscA.connect(this.hornGain);
+    this.hornOscB.connect(this.hornGain);
+    this.hornGain.connect(this.masterGain);
+    this.hornOscA.start();
+    this.hornOscB.start();
 
     // Police siren oscillator
     this.sirenOsc = this.ctx.createOscillator();
@@ -93,6 +123,13 @@ export class SoundEngine {
     this.musicEnabled = enabled;
   }
 
+  public setHornActive(active: boolean): void {
+    if (active) this.init();
+    if (!this.ctx || !this.hornGain) return;
+    const target = active && !this.muted ? 0.075 : 0;
+    this.hornGain.gain.setTargetAtTime(target, this.ctx.currentTime, 0.025);
+  }
+
   public updateContinuous(
     dt: number,
     inVehicle: boolean,
@@ -103,23 +140,29 @@ export class SoundEngine {
     isSprinting: boolean,
     elapsed: number,
     engineRpm?: number,
+    isHardBraking = false,
   ): void {
     if (!this.ctx || !this.masterGain) return;
     const now = this.ctx.currentTime;
 
-    if (this.engineOsc && this.engineGain) {
+    if (this.engineOsc && this.engineSubOsc && this.engineFilter && this.engineGain) {
       if (inVehicle) {
         const rpmNorm = engineRpm !== undefined ? engineRpm : speedNorm;
-        const targetFreq = 44 + rpmNorm * 124;
-        this.engineOsc.frequency.setTargetAtTime(targetFreq, now, 0.045);
-        this.engineGain.gain.setTargetAtTime(0.075 + rpmNorm * 0.085, now, 0.06);
+        const targetFreq = 44 + rpmNorm * 134;
+        this.engineOsc.frequency.setTargetAtTime(targetFreq, now, 0.04);
+        this.engineSubOsc.frequency.setTargetAtTime(targetFreq * 0.5, now, 0.04);
+        this.engineFilter.frequency.setTargetAtTime(200 + rpmNorm * 680, now, 0.05);
+        this.engineGain.gain.setTargetAtTime(0.065 + rpmNorm * 0.085, now, 0.06);
       } else {
         this.engineGain.gain.setTargetAtTime(0, now, 0.08);
+        if (this.hornGain) {
+          this.hornGain.gain.setTargetAtTime(0, now, 0.03);
+        }
       }
     }
 
     if (this.skidGain) {
-      const targetSkid = inVehicle && isDrifting && speedNorm > 0.14 ? 0.075 : 0;
+      const targetSkid = inVehicle && (isDrifting || isHardBraking) && speedNorm > 0.14 ? 0.085 : 0;
       this.skidGain.gain.setTargetAtTime(targetSkid, now, 0.04);
     }
 
@@ -143,6 +186,24 @@ export class SoundEngine {
     } else {
       this.footstepTimer = 0.05;
     }
+  }
+
+  public playGearShift(): void {
+    if (!this.ctx || !this.masterGain || this.muted || !this.noiseBuffer) return;
+    const now = this.ctx.currentTime;
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuffer;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(620, now);
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(0.06, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.075);
+    src.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.masterGain);
+    src.start(now);
+    src.stop(now + 0.085);
   }
 
   public playFootstep(): void {

@@ -1,0 +1,14 @@
+{
+  "id": "dodge_challenger_lb",
+  "kind": "challenger",
+  "name": "Dodge Challenger 2015 LB Performance",
+  "category": "Muscle Widebody",
+  "description": "Dodge Challenger SRT Hellcat 2015 Liberty Walk Widebody com modelo 3D real, carroçaria alargada e rodas articuladas.",
+  "defaultColor": "#18181b",
+  "previewUrl": null,
+  "modelUrl": "/assets/vehicles/2015_dodge_challenger_lbperformance.glb",
+  "orientationOffsetY": 0,
+  "targetLength": 5.02,
+  "cockpitOffset": { "x": 0.39, "y": 1.12, "z": -0.08 },
+  "wheelNames": ["^3dwheel", "wheel_fl", "wheel_fr", "wheel_rl", "wheel_rr"]
+}

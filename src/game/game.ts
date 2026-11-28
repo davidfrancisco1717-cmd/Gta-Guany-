@@ -1,26 +1,43 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import {
+  CameraMode,
   GamePhase,
   GraphicsQuality,
   HudSnapshot,
   InventoryItem,
   MinimapEntity,
   QUALITY_PRESETS,
+  SavedVehicleEntry,
+  VEHICLE_SPECS,
+  VehicleCatalogItem,
   VehicleKind,
   WeaponId,
 } from './types';
 import { createProceduralTextures, ProceduralTextureSet } from './textures';
 import { SoundEngine } from './audio';
 import { buildCity, CityWorld, ROAD_COORDS } from './city';
-import { createVehicle, stepTrafficAI, stepVehiclePhysics, VehicleInstance } from './vehicles';
+import {
+  applyGltfTemplateToVehicle,
+  createVehicle,
+  stepTrafficAI,
+  stepVehiclePhysics,
+  VehicleInstance,
+} from './vehicles';
+import {
+  BUILTIN_VEHICLE_CATALOG,
+  importMustangGltf,
+  MUSTANG_DEFAULT_LENGTH,
+  MUSTANG_DEFAULT_WHEEL_NAMES,
+  VehicleAssetLoader,
+} from './vehicleLoader';
 import { createPedestrian, Pedestrian, PlayerController, stepPedestrian } from './player';
 import { PoliceSystem } from './police';
 import { CITY_MISSIONS, MissionManager } from './missions';
 import { ThirdPersonCamera } from './camera';
 import { DesktopInputManager } from './controls';
 import { createMobileInputState, detectTouchDevice, MobileInputState } from './mobile-controls';
-import { getDistrictName, groundHeightAt } from './physics';
+import { findSafeExitPosition, getDistrictName, isPositionClear, raycastCollidersFraction } from './physics';
 
 interface Particle {
   mesh: THREE.Mesh;
@@ -94,6 +111,14 @@ export class GameEngine {
   private cameraSensitivity = 1.0;
 
   private activeVehicle: VehicleInstance | null = null;
+  private vehicleLoader = new VehicleAssetLoader();
+  private vehicleCatalog: VehicleCatalogItem[] = [...BUILTIN_VEHICLE_CATALOG];
+  private savedVehicles: SavedVehicleEntry[] = [];
+  private garageOpen = false;
+  private inGarageZone = false;
+  private importedObjectUrls: string[] = [];
+  private mustangImportSource: File[] | string | ArrayBuffer | null = null;
+  private mustangOrientationOffsetY = 0;
   private dayProgress = 0.705; // Golden-hour sunset start matching reference visuals
   private timer = new THREE.Timer();
   private elapsed = 0;
@@ -104,6 +129,7 @@ export class GameEngine {
   private toastTimer = 0;
   private hitstopTimer = 0;
   private driftSmokeTimer = 0;
+  private damageSmokeTimer = 0;
   private currentInteractPrompt: string | null = null;
   private currentInteractAction: (() => void) | null = null;
 
@@ -206,7 +232,9 @@ export class GameEngine {
     this.police = new PoliceSystem(this.scene, this.textures.contactShadow, qCfg.reflections, this.textures);
     this.missions = new MissionManager(this.scene);
 
+    this.savedVehicles = this.loadSavedVehicles();
     this.spawnInitialWorldActors();
+    void this.initVehicleCatalog();
 
     if (!this.isSoftwareGl) {
       this.renderer.compile(this.scene, this.camRig.camera);
@@ -226,26 +254,120 @@ export class GameEngine {
     this.scheduleNextTick();
   }
 
+  private loadSavedVehicles(): SavedVehicleEntry[] {
+    if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') return [];
+    try {
+      const raw = window.localStorage.getItem('webgta_saved_vehicles_v1');
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? (parsed as SavedVehicleEntry[]) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  private persistSavedVehicles(): void {
+    if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') return;
+    try {
+      window.localStorage.setItem('webgta_saved_vehicles_v1', JSON.stringify(this.savedVehicles));
+    } catch {
+      // Ignore storage quota errors
+    }
+  }
+
+  private async initVehicleCatalog(): Promise<void> {
+    const items = await this.vehicleLoader.loadCatalog();
+    if (this.destroyed) return;
+    this.vehicleCatalog = items;
+    // Apply configured GLTF models on matching parked vehicles when present
+    for (const v of this.vehicles) {
+      const item = this.vehicleCatalog.find((c) => c.kind === v.spec.kind && c.modelUrl);
+      if (item && item.modelUrl) {
+        void this.tryAttachCatalogGltf(v, item);
+      }
+    }
+    this.emitHud();
+  }
+
+  private async tryAttachCatalogGltf(v: VehicleInstance, item: VehicleCatalogItem): Promise<void> {
+    if (!item.modelUrl) return;
+    try {
+      const allowShadows = !this.isSoftwareGl && QUALITY_PRESETS[this.quality].shadows;
+      const disableTransmission = this.isSoftwareGl || this.quality !== 'high' || detectTouchDevice();
+      const tpl =
+        this.vehicleLoader.getResolvedTemplate(item.modelUrl) ??
+        (await this.vehicleLoader.loadGltfTemplate(item.modelUrl, item.kind, {
+          targetLength: item.targetLength,
+          orientationOffsetY: item.orientationOffsetY,
+          wheelNames: item.wheelNames,
+          shadows: allowShadows,
+          disableTransmission,
+        }));
+      if (!this.destroyed) {
+        applyGltfTemplateToVehicle(v, this.vehicleLoader, tpl, item.modelUrl);
+      }
+    } catch {
+      // Fall back gracefully to procedural 3D chassis
+    }
+  }
+
+  private findClearVehicleSpot(
+    prefX: number,
+    prefZ: number,
+    radius: number,
+  ): { x: number; z: number } {
+    const obstacleCircles: { x: number; z: number; radius: number }[] = [
+      { x: this.player.x, z: this.player.z, radius: 2.2 },
+    ];
+    for (const v of this.vehicles) {
+      obstacleCircles.push({ x: v.x, z: v.z, radius: v.spec.halfLength + 0.6 });
+    }
+
+    if (isPositionClear(prefX, prefZ, radius, this.city.colliders, obstacleCircles)) {
+      return { x: prefX, z: prefZ };
+    }
+
+    for (let ring = 1; ring <= 8; ring++) {
+      const r = ring * 3.5;
+      for (let a = 0; a < 8; a++) {
+        const ang = (a / 8) * Math.PI * 2;
+        const cx = prefX + Math.cos(ang) * r;
+        const cz = prefZ + Math.sin(ang) * r;
+        if (isPositionClear(cx, cz, radius, this.city.colliders, obstacleCircles)) {
+          return { x: cx, z: cz };
+        }
+      }
+    }
+    return { x: prefX, z: prefZ };
+  }
+
   private spawnInitialWorldActors(): void {
     const qCfg = QUALITY_PRESETS[this.quality];
 
-    // Hero Parked Vehicles right near player spawn & key landmarks
+    // Hero Parked Vehicles distributed cleanly across the city (starting with Yellow Camaro SS & Red Mustang GT near player)
     const parkedSpecs: { kind: VehicleKind; x: number; z: number; h: number; color?: number }[] = [
-      { kind: 'sports', x: -8, z: 6, h: Math.PI / 2, color: 0xe11d48 },
-      { kind: 'sedan', x: -20, z: 10, h: -Math.PI / 2, color: 0x2563eb },
-      { kind: 'moto', x: -6, z: 22, h: 0, color: 0xf97316 },
+      { kind: 'camaro', x: -8.8, z: 10.5, h: 0, color: 0xea9600 }, // Yellow Camaro SS parked along curb near spawn!
+      { kind: 'mustang', x: -8.8, z: 16.5, h: 0, color: 0xdc1e1e }, // Race Red 2015 Mustang GT 5.0 parked beside player!
+      { kind: 'sports', x: -8, z: 2.5, h: Math.PI / 2, color: 0xb84a1e }, // Lexus LC 500 Convertible near spawn
+      { kind: 'challenger', x: -8.8, z: -12.5, h: 0, color: 0x18181b }, // Dodge Challenger 2015 LB Performance near spawn
+      { kind: 'sedan', x: -20, z: 8.5, h: -Math.PI / 2, color: 0x2563eb },
+      { kind: 'moto', x: -4.5, z: 21, h: 0, color: 0xf97316 },
       { kind: 'suv', x: 76, z: -26, h: Math.PI, color: 0x1e293b }, // Parking lot
-      { kind: 'sports', x: 84, z: -26, h: Math.PI, color: 0xfacc15 }, // Parking lot
+      { kind: 'camaro', x: 84, z: -26, h: Math.PI, color: 0xea9600 }, // Parking lot Camaro
       { kind: 'van', x: 24, z: 36, h: Math.PI / 2, color: 0xf1f5f9 }, // Near gas station
       { kind: 'police', x: 76, z: -84, h: 0 }, // Police precinct
+      { kind: 'mustang', x: 118, z: 16, h: Math.PI, color: 0xdc1e1e }, // Beachfront Mustang GT
+      { kind: 'sports', x: 118, z: 24, h: Math.PI, color: 0xb84a1e }, // Beachfront Lexus LC 500 Convertible
+      { kind: 'suv', x: -24, z: 74, h: Math.PI / 2, color: 0x334155 }, // South residential
     ];
 
     parkedSpecs.forEach((p, idx) => {
+      const clear = this.findClearVehicleSpot(p.x, p.z, VEHICLE_SPECS[p.kind].halfLength * 0.9);
       const v = createVehicle(
         `parked_${idx}`,
         p.kind,
-        p.x,
-        p.z,
+        clear.x,
+        clear.z,
         p.h,
         this.textures.contactShadow,
         qCfg.reflections,
@@ -265,7 +387,8 @@ export class GameEngine {
 
   private syncTrafficCount(target: number): void {
     const aiCars = this.vehicles.filter((v) => v.aiActive && !v.occupiedByPlayer);
-    const kinds: VehicleKind[] = ['sedan', 'sedan', 'suv', 'sports', 'van', 'moto'];
+    // Keep AI traffic lightweight for Android/mobile FPS (hero Lexuses spawn parked & via Garage/Mechanic)
+    const kinds: VehicleKind[] = ['sedan', 'sedan', 'suv', 'van', 'moto'];
     const qCfg = QUALITY_PRESETS[this.quality];
 
     if (aiCars.length < target) {
@@ -281,11 +404,12 @@ export class GameEngine {
         const heading = axis === 'z' ? (dir === 1 ? 0 : Math.PI) : dir === 1 ? Math.PI / 2 : -Math.PI / 2;
 
         const kind = kinds[i % kinds.length];
+        const clear = this.findClearVehicleSpot(x, z, VEHICLE_SPECS[kind].halfLength * 0.9);
         const v = createVehicle(
           `traffic_${Date.now()}_${i}`,
           kind,
-          x,
-          z,
+          clear.x,
+          clear.z,
           heading,
           this.textures.contactShadow,
           qCfg.reflections,
@@ -504,13 +628,17 @@ export class GameEngine {
       heading + Math.PI / 2,
       this.textures.contactShadow,
       qCfg.reflections,
-      0x111827,
+      0xb84a1e,
       this.textures,
     );
     this.scene.add(car.group);
     this.vehicles.push(car);
+    const lexusItem = this.vehicleCatalog.find((c) => c.kind === 'sports' && c.modelUrl);
+    if (lexusItem) {
+      void this.tryAttachCatalogGltf(car, lexusItem);
+    }
     this.sound.playDoorChime();
-    this.showToast('Comet GT entregue junto de ti (-$100)!');
+    this.showToast('Lexus LC 500 Convertible entregue junto de ti (-$100)!');
     this.emitHud();
   }
 
@@ -543,9 +671,304 @@ export class GameEngine {
     this.toastTimer = 3.2;
   }
 
-  private enterNearestVehicle(): boolean {
+  private syncVehicleGlassOpacity(vehicle: VehicleInstance, isCockpit: boolean): void {
+    const camGlass = vehicle.bodyGroup.userData.camaroGlassMat as THREE.MeshPhysicalMaterial | undefined;
+    if (camGlass) {
+      camGlass.opacity = isCockpit ? 0.16 : 0.89;
+    }
+  }
+
+  public toggleVehicleCameraMode(): void {
+    if (!this.activeVehicle) return;
+    const nextMode: CameraMode = this.camRig.toggleMode();
+    const isCockpit = nextMode === 'cockpit';
+    this.activeVehicle.driverGroup.visible = !isCockpit;
+    this.syncVehicleGlassOpacity(this.activeVehicle, isCockpit);
+    this.showToast(isCockpit ? 'Câmara Interior (Cockpit)' : 'Câmara Exterior');
+    this.emitHud();
+  }
+
+  public openGarage(): void {
+    if (this.phase !== 'playing') return;
+    this.garageOpen = true;
+    this.sound.setHornActive(false);
+    if (document.pointerLockElement) document.exitPointerLock();
+    this.desktopInput.clearFrameEdges();
+    this.emitHud();
+  }
+
+  public closeGarage(): void {
+    this.garageOpen = false;
+    this.timer.reset();
+    this.desktopInput.clearFrameEdges();
+    this.emitHud();
+  }
+
+  public repairActiveVehicle(): void {
+    const target = this.activeVehicle ?? this.findNearestVehicle(6.5);
+    if (!target) {
+      this.showToast('Aproxima um veículo para reparar.');
+      return;
+    }
+    if (this.player.cash < 50) {
+      this.showToast('Precisas de $50 para reparar o veículo.');
+      return;
+    }
+    this.player.cash -= 50;
+    target.health = target.maxHealth;
+    this.sound.playMissionSuccess();
+    this.showToast(`${target.spec.name} reparado a 100% (-$50)!`);
+    this.emitHud();
+  }
+
+  public saveActiveVehicleToGarage(): void {
+    const target = this.activeVehicle ?? this.findNearestVehicle(7.5);
+    if (!target) {
+      this.showToast('Entra ou aproxima-te de um veículo para o guardar na garagem.');
+      return;
+    }
+    const cat = this.vehicleCatalog.find((c) => c.kind === target.spec.kind);
+    const entry: SavedVehicleEntry = {
+      slotId: `slot_${Date.now()}`,
+      catalogId: cat?.id ?? target.spec.kind,
+      kind: target.spec.kind,
+      name: target.spec.name,
+      color: target.paintColor,
+      health: target.maxHealth,
+      savedAtLabel: this.formatTimeOfDay(this.dayProgress),
+      customModelUrl: target.customModelUrl,
+    };
+    target.health = target.maxHealth;
+    this.savedVehicles = [entry, ...this.savedVehicles].slice(0, 8);
+    this.persistSavedVehicles();
+    this.sound.playMissionSuccess();
+    this.showToast(`${target.spec.name} guardado e reparado na Garagem!`);
+    this.emitHud();
+  }
+
+  public removeSavedVehicle(slotId: string): void {
+    this.savedVehicles = this.savedVehicles.filter((s) => s.slotId !== slotId);
+    this.persistSavedVehicles();
+    this.emitHud();
+  }
+
+  public async spawnCatalogVehicle(
+    catalogId: string,
+    colorOverride?: number,
+    customModelOverride?: string,
+  ): Promise<void> {
+    const item = this.vehicleCatalog.find((c) => c.id === catalogId) ?? this.vehicleCatalog[0];
+    if (!item) return;
+
+    const kind = item.kind;
+    const spec = VEHICLE_SPECS[kind];
+    const colorNum =
+      colorOverride ?? parseInt(item.defaultColor.replace('#', ''), 16) ?? spec.defaultColor;
+
+    // Exit current vehicle smoothly if player is replacing their active ride inside garage
+    if (this.activeVehicle) {
+      this.exitVehicle();
+    }
+
+    const nearSpawnBlock = Math.hypot(this.player.x - (-15), this.player.z - 16) < 28;
+    const baseHeading = nearSpawnBlock ? 0 : this.player.heading;
+    const prefX = nearSpawnBlock ? -3.4 : this.player.x + Math.sin(baseHeading) * 4.2;
+    const prefZ = nearSpawnBlock ? 16 : this.player.z + Math.cos(baseHeading) * 4.2;
+    const spot = this.findClearVehicleSpot(prefX, prefZ, spec.halfLength + 0.4);
+    const qCfg = QUALITY_PRESETS[this.quality];
+
+    const v = createVehicle(
+      `garage_spawn_${Date.now()}`,
+      kind,
+      spot.x,
+      spot.z,
+      baseHeading,
+      this.textures.contactShadow,
+      qCfg.reflections,
+      colorNum,
+      this.textures,
+    );
+    this.scene.add(v.group);
+    this.vehicles.push(v);
+
+    const modelUrl = customModelOverride ?? item.modelUrl;
+    if (modelUrl) {
+      try {
+        const allowShadows = !this.isSoftwareGl && qCfg.shadows;
+        const disableTransmission = this.isSoftwareGl || this.quality !== 'high' || detectTouchDevice();
+        const tpl =
+          this.vehicleLoader.getResolvedTemplate(modelUrl) ??
+          (await this.vehicleLoader.loadGltfTemplate(modelUrl, kind, {
+            targetLength: item.targetLength,
+            orientationOffsetY: item.orientationOffsetY,
+            wheelNames: item.wheelNames,
+            shadows: allowShadows,
+            disableTransmission,
+          }));
+        if (!this.destroyed) {
+          applyGltfTemplateToVehicle(v, this.vehicleLoader, tpl, modelUrl);
+        }
+      } catch {
+        this.showToast(`Erro ao carregar GLB de ${item.name}; a usar carroçaria 3D local.`);
+      }
+    }
+
+    this.closeGarage();
+    this.enterSpecificVehicle(v);
+    this.sound.playDoorChime();
+    this.showToast(`${item.name} entregue e pronto a conduzir!`);
+    this.emitHud();
+  }
+
+  public async retrieveSavedVehicle(slotId: string): Promise<void> {
+    const saved = this.savedVehicles.find((s) => s.slotId === slotId);
+    if (!saved) return;
+    await this.spawnCatalogVehicle(saved.catalogId, saved.color, saved.customModelUrl);
+  }
+
+  /**
+   * Dedicated external .GLTF / .GLB importer for the Ford Mustang GT.
+   * Replaces the Mustang catalog asset and all Mustang instances in the world
+   * with the imported 3D model while preserving authentic 1:1 proportions.
+   */
+  public async importMustangModel(
+    source: File | File[] | FileList | string | ArrayBuffer,
+    options?: {
+      orientationOffsetY?: number;
+      fileName?: string;
+      autoDrive?: boolean;
+    },
+  ): Promise<boolean> {
+    try {
+      const allowShadows = !this.isSoftwareGl && QUALITY_PRESETS[this.quality].shadows;
+      const orientationOffsetY = options?.orientationOffsetY ?? this.mustangOrientationOffsetY;
+
+      let storedSource: File[] | string | ArrayBuffer;
+      if (typeof source === 'string') {
+        storedSource = source;
+        if (source.startsWith('blob:')) this.importedObjectUrls.push(source);
+      } else if (source instanceof ArrayBuffer) {
+        storedSource = source;
+      } else if ('size' in source) {
+        storedSource = [source];
+      } else {
+        storedSource = Array.from(source);
+      }
+
+      const tpl = await importMustangGltf(source, this.vehicleLoader, {
+        targetLength: MUSTANG_DEFAULT_LENGTH,
+        orientationOffsetY,
+        wheelNames: MUSTANG_DEFAULT_WHEEL_NAMES,
+        shadows: allowShadows,
+      });
+
+      if (this.destroyed) return false;
+
+      this.mustangImportSource = storedSource;
+      this.mustangOrientationOffsetY = orientationOffsetY;
+
+      const sourceLabel =
+        options?.fileName ??
+        (Array.isArray(storedSource)
+          ? storedSource.find((f) => /\.(glb|gltf)$/i.test(f.name))?.name ?? 'Mustang.glb'
+          : typeof storedSource === 'string'
+            ? storedSource.split('/').pop() || 'Mustang.glb'
+            : 'Mustang.glb');
+
+      this.vehicleCatalog = this.vehicleCatalog.map((item) =>
+        item.id === 'mustang_gt' || item.kind === 'mustang'
+          ? {
+              ...item,
+              modelUrl: tpl.url,
+              orientationOffsetY,
+              targetLength: MUSTANG_DEFAULT_LENGTH,
+              description: `Modelo externo carregado (${sourceLabel}) em escala 1:1 (${MUSTANG_DEFAULT_LENGTH}m) com rodas articuladas.`,
+            }
+          : item,
+      );
+
+      for (const v of this.vehicles) {
+        if (v.spec.kind === 'mustang') {
+          applyGltfTemplateToVehicle(v, this.vehicleLoader, tpl, tpl.url);
+        }
+      }
+
+      if (options?.autoDrive) {
+        if (this.activeVehicle?.spec.kind === 'mustang') {
+          this.closeGarage();
+        } else {
+          await this.spawnCatalogVehicle('mustang_gt', VEHICLE_SPECS.mustang.defaultColor, tpl.url);
+        }
+      }
+
+      this.sound.playDoorChime();
+      this.showToast(`Mustang 3D importado (${sourceLabel}) com proporções originais!`);
+      this.emitHud();
+      return true;
+    } catch {
+      this.showToast('Não foi possível importar o ficheiro .GLB/.GLTF do Mustang.');
+      this.emitHud();
+      return false;
+    }
+  }
+
+  public async rotateMustangModel(quarterTurns = 1): Promise<boolean> {
+    const mustangItem = this.vehicleCatalog.find((c) => c.id === 'mustang_gt' || c.kind === 'mustang');
+    const source = this.mustangImportSource ?? mustangItem?.modelUrl;
+    if (!source) return false;
+    const nextOffset =
+      (((this.mustangOrientationOffsetY + quarterTurns * (Math.PI / 2)) % (Math.PI * 2)) + Math.PI * 2) %
+      (Math.PI * 2);
+    return this.importMustangModel(source, {
+      orientationOffsetY: nextOffset,
+      autoDrive: false,
+    });
+  }
+
+  public async importCustomGltfVehicle(
+    fileName: string,
+    objectUrl: string,
+    baseKind: VehicleKind,
+  ): Promise<void> {
+    if (baseKind === 'mustang') {
+      await this.importMustangModel(objectUrl, { fileName, autoDrive: true });
+      return;
+    }
+    this.importedObjectUrls.push(objectUrl);
+    try {
+      const allowShadows = !this.isSoftwareGl && QUALITY_PRESETS[this.quality].shadows;
+      const disableTransmission = this.isSoftwareGl || this.quality !== 'high' || detectTouchDevice();
+      const spec = VEHICLE_SPECS[baseKind];
+      const tpl = await this.vehicleLoader.loadGltfTemplate(objectUrl, baseKind, {
+        targetLength: spec.halfLength * 2,
+        shadows: allowShadows,
+        disableTransmission,
+      });
+
+      const cleanName = fileName.replace(/\.(glb|gltf)$/i, '').slice(0, 26) || 'Modelo Personalizado';
+      const customItem: VehicleCatalogItem = {
+        id: `custom_${Date.now()}`,
+        kind: baseKind,
+        name: cleanName,
+        category: 'GLB Importado',
+        description: `Modelo 3D importado (${fileName}) com normalização automática de escala e rodas.`,
+        defaultColor: '#f5b800',
+        previewUrl: null,
+        modelUrl: tpl.url,
+        targetLength: spec.halfLength * 2,
+        cockpitOffset: spec.cockpitOffset,
+      };
+      this.vehicleCatalog = [customItem, ...this.vehicleCatalog];
+      await this.spawnCatalogVehicle(customItem.id, spec.defaultColor, tpl.url);
+    } catch {
+      this.showToast('Não foi possível ler o ficheiro .GLB/.GLTF selecionado.');
+      this.emitHud();
+    }
+  }
+
+  private findNearestVehicle(maxRange = 4.6): VehicleInstance | null {
     let best: VehicleInstance | null = null;
-    let bestDist = 4.6;
+    let bestDist = maxRange;
     for (let i = 0; i < this.vehicles.length; i++) {
       const v = this.vehicles[i];
       const d = Math.hypot(v.x - this.player.x, v.z - this.player.z);
@@ -554,12 +977,18 @@ export class GameEngine {
         best = v;
       }
     }
-    if (!best) return false;
+    return best;
+  }
 
+  private enterSpecificVehicle(best: VehicleInstance): void {
     this.activeVehicle = best;
     best.occupiedByPlayer = true;
     best.aiActive = false;
+    const isCockpit = this.camRig.mode === 'cockpit';
+    best.driverGroup.visible = !isCockpit;
+    this.syncVehicleGlassOpacity(best, isCockpit);
     this.player.rig.group.visible = false;
+    this.camRig.triggerVehicleTransition(true);
     this.sound.playDoorChime();
 
     // Hijacking moving traffic or police car triggers wanted level!
@@ -569,6 +998,12 @@ export class GameEngine {
     } else if (Math.abs(best.forwardSpeed) > 2.5) {
       this.police.addCrime(25);
     }
+  }
+
+  private enterNearestVehicle(): boolean {
+    const best = this.findNearestVehicle(4.8);
+    if (!best) return false;
+    this.enterSpecificVehicle(best);
     return true;
   }
 
@@ -576,22 +1011,59 @@ export class GameEngine {
     if (!this.activeVehicle) return;
     const v = this.activeVehicle;
     v.occupiedByPlayer = false;
-    // Place player cleanly beside driver door (left side)
-    const leftX = -Math.cos(v.heading) * (v.spec.halfWidth + 0.95);
-    const leftZ = Math.sin(v.heading) * (v.spec.halfWidth + 0.95);
-    this.player.x = v.x + leftX;
-    this.player.z = v.z + leftZ;
-    this.player.y = groundHeightAt(this.player.x, this.player.z);
+    v.driverGroup.visible = false;
+    this.syncVehicleGlassOpacity(v, false);
+    this.sound.setHornActive(false);
+
+    // Safe braking threshold when jumping out of moving vehicle
+    if (Math.abs(v.forwardSpeed) > 5) {
+      v.vx *= 0.25;
+      v.vz *= 0.25;
+      v.forwardSpeed *= 0.25;
+    }
+
+    const otherVehicles = this.vehicles
+      .filter((o) => o !== v)
+      .map((o) => ({ x: o.x, z: o.z, halfWidth: o.spec.halfWidth }));
+
+    const exitPos = findSafeExitPosition(
+      v.x,
+      v.z,
+      v.heading,
+      v.spec.halfWidth,
+      v.spec.halfLength,
+      this.city.colliders,
+      otherVehicles,
+    );
+
+    this.player.x = exitPos.x;
+    this.player.z = exitPos.z;
+    this.player.y = exitPos.y;
     this.player.heading = v.heading;
     this.player.rig.group.position.set(this.player.x, this.player.y, this.player.z);
     this.player.rig.group.visible = true;
     this.activeVehicle = null;
+
+    this.mobileInput.gasHeld = false;
+    this.mobileInput.brakeHeld = false;
+    this.mobileInput.reverseHeld = false;
+    this.mobileInput.handbrakeHeld = false;
+    this.mobileInput.steerLeftHeld = false;
+    this.mobileInput.steerRightHeld = false;
+    this.mobileInput.hornHeld = false;
+
+    this.camRig.triggerVehicleTransition(false);
     this.sound.playDoorChime();
   }
 
   private spawnParticles(x: number, y: number, z: number, count: number, isSpark: boolean): void {
     if (!QUALITY_PRESETS[this.quality].particles) return;
+    const maxParticles = this.quality === 'high' ? 110 : 75;
     for (let i = 0; i < count; i++) {
+      if (this.particles.length >= maxParticles) {
+        const oldest = this.particles.shift();
+        if (oldest) this.scene.remove(oldest.mesh);
+      }
       const mesh = new THREE.Mesh(this.particleGeo, isSpark ? this.sparkMat : this.smokeMat);
       mesh.position.set(x, y, z);
       this.scene.add(mesh);
@@ -712,7 +1184,7 @@ export class GameEngine {
   private afterDraw(cb: () => void): void {
     const gl = this.renderer.getContext() as WebGL2RenderingContext;
     if (!gl || typeof gl.fenceSync !== 'function') {
-      this.frameId = window.setTimeout(cb, 80);
+      this.frameId = window.setTimeout(cb, 16);
       return;
     }
     const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
@@ -724,7 +1196,7 @@ export class GameEngine {
         this.frameId = window.setTimeout(poll, 5);
       } else {
         if (sync) gl.deleteSync(sync);
-        this.frameId = window.setTimeout(cb, 80);
+        this.frameId = window.setTimeout(cb, 16);
       }
     };
     this.frameId = window.setTimeout(poll, 5);
@@ -743,11 +1215,17 @@ export class GameEngine {
       if (this.toastTimer <= 0) this.toastMessage = null;
     }
 
-    // Handle Pause shortcut (Esc / P)
+    // Handle Garage shortcut (G) & Pause shortcut (Esc / P)
     if (this.desktopInput.consumeJustPressed('Escape') || this.desktopInput.consumeJustPressed('KeyP')) {
-      if (this.phase === 'playing' || this.phase === 'paused') {
+      if (this.garageOpen) {
+        this.closeGarage();
+      } else if (this.phase === 'playing' || this.phase === 'paused') {
         this.togglePause();
       }
+    }
+    if (this.phase === 'playing' && this.desktopInput.consumeJustPressed('KeyG')) {
+      if (this.garageOpen) this.closeGarage();
+      else this.openGarage();
     }
 
     if (this.phase === 'title') {
@@ -756,14 +1234,15 @@ export class GameEngine {
       this.city.update(this.elapsed, this.dayProgress, _tmpVec, !this.isSoftwareGl && QUALITY_PRESETS[this.quality].shadows);
       this.camRig.updateTitlePan(this.elapsed);
       this.desktopInput.clearFrameEdges();
-    } else if (this.phase === 'playing') {
+    } else if (this.phase === 'playing' && !this.garageOpen) {
       if (this.hitstopTimer > 0) {
         this.hitstopTimer -= dt;
       } else {
         this.stepSimulation(dt);
       }
     } else {
-      // Paused / Wasted / Busted: silence continuous sounds
+      // Paused / Garage / Wasted / Busted: silence continuous sounds
+      this.sound.setHornActive(false);
       this.sound.updateContinuous(dt, false, 0, false, 0, false, false, this.elapsed);
       this.desktopInput.clearFrameEdges();
     }
@@ -788,8 +1267,15 @@ export class GameEngine {
     this.dayProgress = (this.dayProgress + dt * 0.0042) % 1;
 
     const playerPos = _tmpVec.set(this.player.x, this.player.y, this.player.z);
-    const allowShadows = !this.isSoftwareGl && QUALITY_PRESETS[this.quality].shadows;
+    const qCfg = QUALITY_PRESETS[this.quality];
+    const allowShadows = !this.isSoftwareGl && qCfg.shadows;
     const { nsGreen, isNight } = this.city.update(this.elapsed, this.dayProgress, playerPos, allowShadows);
+    this.renderer.toneMappingExposure = THREE.MathUtils.damp(
+      this.renderer.toneMappingExposure,
+      isNight ? 0.96 : 1.09,
+      2.5,
+      dt,
+    );
 
     // Camera Look (desktop mouse + mobile right pad)
     const desktopLook = this.desktopInput.consumeLookDelta(dt);
@@ -822,22 +1308,56 @@ export class GameEngine {
       (this.desktopInput.isHeld('KeyD') || this.desktopInput.isHeld('ArrowRight') ? 1 : 0) -
       (this.desktopInput.isHeld('KeyA') || this.desktopInput.isHeld('ArrowLeft') ? 1 : 0);
 
-    if (this.activeVehicle) {
-      // Driving Controls
-      const mobileThrottle =
-        (this.mobileInput.gasHeld ? 1 : 0) - (this.mobileInput.brakeHeld ? 1 : 0) ||
-        this.mobileInput.moveY;
-      const throttle = THREE.MathUtils.clamp(keyFwd + mobileThrottle, -1, 1);
-      const steer = THREE.MathUtils.clamp(-(keyRight + this.mobileInput.moveX), -1, 1);
-      const handbrake = this.desktopInput.isHeld('Space') || this.mobileInput.jumpPressed;
+    let activeSteerInput = 0;
+    let activeBrakeOnly = false;
 
-      if (this.desktopInput.isHeld('KeyH') || this.mobileInput.hornHeld) {
-        this.sound.playHorn();
+    if (this.activeVehicle) {
+      // Toggle Chase / Interior Cockpit Camera (C or V)
+      if (this.desktopInput.consumeJustPressed('KeyC') || this.desktopInput.consumeJustPressed('KeyV')) {
+        this.toggleVehicleCameraMode();
+      }
+
+      // Driving Controls (Desktop + Dedicated Continuous Mobile Buttons + Stick)
+      const wantBrakeOnly =
+        this.mobileInput.brakeHeld &&
+        !this.mobileInput.reverseHeld &&
+        !this.mobileInput.gasHeld &&
+        keyFwd === 0;
+      activeBrakeOnly = wantBrakeOnly;
+
+      const mobileThrottle =
+        (this.mobileInput.gasHeld ? 1 : 0) -
+        (this.mobileInput.reverseHeld || this.mobileInput.brakeHeld ? 1 : 0) ||
+        this.mobileInput.moveY;
+      const throttle = wantBrakeOnly ? 0 : THREE.MathUtils.clamp(keyFwd + mobileThrottle, -1, 1);
+
+      const mobileSteer =
+        (this.mobileInput.steerLeftHeld ? 1 : 0) -
+        (this.mobileInput.steerRightHeld ? 1 : 0) -
+        this.mobileInput.moveX;
+      const steer = THREE.MathUtils.clamp(-keyRight + mobileSteer, -1, 1);
+      activeSteerInput = steer;
+
+      const handbrake =
+        this.desktopInput.isHeld('Space') ||
+        this.mobileInput.handbrakeHeld ||
+        this.mobileInput.jumpPressed;
+      this.mobileInput.jumpPressed = false;
+
+      const hornActive = this.desktopInput.isHeld('KeyH') || this.mobileInput.hornHeld;
+      this.sound.setHornActive(hornActive);
+      if (hornActive) {
+        for (let pi = 0; pi < this.pedestrians.length; pi++) {
+          const ped = this.pedestrians[pi];
+          if (ped.downedTimer <= 0 && Math.hypot(ped.x - this.player.x, ped.z - this.player.z) < 12) {
+            ped.fleeTimer = Math.max(ped.fleeTimer, 2.2);
+          }
+        }
       }
 
       stepVehiclePhysics(
         this.activeVehicle,
-        { throttle, steer, handbrake },
+        { throttle, steer, handbrake, brakeOnly: wantBrakeOnly },
         dt,
         this.city.colliders,
         this.vehicles,
@@ -847,9 +1367,21 @@ export class GameEngine {
           this.sound.playCollision(impact / 22);
           this.camRig.addShake(Math.min(0.45, impact * 0.02));
           this.spawnParticles(ix, 0.8, iz, 7, true);
+          if (impact > 7) {
+            for (let pi = 0; pi < this.pedestrians.length; pi++) {
+              const ped = this.pedestrians[pi];
+              if (ped.downedTimer <= 0 && Math.hypot(ped.x - ix, ped.z - iz) < 18) {
+                ped.fleeTimer = Math.max(ped.fleeTimer, 4.5);
+              }
+            }
+          }
+        },
+        () => {
+          this.sound.playGearShift();
         },
       );
 
+      this.activeVehicle.driverGroup.visible = this.camRig.mode !== 'cockpit';
       this.player.x = this.activeVehicle.x;
       this.player.y = this.activeVehicle.y;
       this.player.z = this.activeVehicle.z;
@@ -890,9 +1422,33 @@ export class GameEngine {
         this.driftSmokeTimer = 0;
       }
 
+      // Progressive engine damage smoke & critical sparks
+      const dmgRatio = this.activeVehicle.maxHealth > 0 ? this.activeVehicle.health / this.activeVehicle.maxHealth : 1;
+      if (dmgRatio < 0.48 && this.activeVehicle.health > 0) {
+        this.damageSmokeTimer -= dt;
+        if (this.damageSmokeTimer <= 0) {
+          this.damageSmokeTimer = dmgRatio < 0.25 ? 0.08 : 0.16;
+          const v = this.activeVehicle;
+          const hoodX = v.x + Math.sin(v.heading) * (v.spec.halfLength * 0.62);
+          const hoodZ = v.z + Math.cos(v.heading) * (v.spec.halfLength * 0.62);
+          this.spawnParticles(hoodX, v.y + 0.95, hoodZ, 1, false);
+          if (dmgRatio < 0.25 && Math.random() < 0.45) {
+            this.spawnParticles(hoodX, v.y + 0.95, hoodZ, 1, true);
+          }
+        }
+      } else {
+        this.damageSmokeTimer = 0;
+      }
+
       // Vehicle exploded / totaled check
       if (this.activeVehicle.health <= 0) {
         this.spawnParticles(this.activeVehicle.x, 1.4, this.activeVehicle.z, 18, true);
+        this.spawnParticles(this.activeVehicle.x, 1.8, this.activeVehicle.z, 8, false);
+        for (const ped of this.pedestrians) {
+          if (Math.hypot(ped.x - this.activeVehicle.x, ped.z - this.activeVehicle.z) < 26) {
+            ped.fleeTimer = 7;
+          }
+        }
         this.exitVehicle();
         this.player.applyDamage(35);
       }
@@ -929,9 +1485,13 @@ export class GameEngine {
     if (this.desktopInput.consumeJustPressed('Digit2')) this.selectWeapon('bat');
     if (this.desktopInput.consumeJustPressed('Digit3')) this.selectWeapon('pistol');
 
-    // Step AI Traffic Vehicles
+    // Step AI Traffic Vehicles & Distance Visibility Culling (Android FPS optimization)
+    const vehCullDistSq = Math.pow(qCfg.drawDistance * 0.9, 2);
     for (let i = 0; i < this.vehicles.length; i++) {
       const v = this.vehicles[i];
+      const dxP = v.x - this.player.x;
+      const dzP = v.z - this.player.z;
+      v.group.visible = v === this.activeVehicle || dxP * dxP + dzP * dzP <= vehCullDistSq;
       if (v.aiActive && !v.occupiedByPlayer) {
         stepTrafficAI(
           v,
@@ -942,6 +1502,13 @@ export class GameEngine {
           this.city.colliders,
           isNight,
           this.elapsed,
+          () => this.sound.playHorn(),
+          (impact, ix, iz) => {
+            if (Math.hypot(ix - this.player.x, iz - this.player.z) < 42) {
+              this.sound.playCollision(Math.min(1, impact / 22));
+              this.spawnParticles(ix, 0.8, iz, 5, true);
+            }
+          },
         );
       } else if (!v.occupiedByPlayer && !v.isPolice) {
         // Parked car gentle settle
@@ -959,10 +1526,11 @@ export class GameEngine {
       }
     }
 
-    // Step Pedestrians & Vehicle-vs-Pedestrian Impact
+    // Step Pedestrians & Vehicle-vs-Pedestrian Impact (with distance LOD culling)
+    const pedCullDistSq = Math.pow(qCfg.drawDistance * 0.62, 2);
     for (let i = 0; i < this.pedestrians.length; i++) {
       const ped = this.pedestrians[i];
-      stepPedestrian(ped, dt, playerPos, this.city.colliders);
+      stepPedestrian(ped, dt, playerPos, this.city.colliders, undefined, pedCullDistSq);
 
       if (this.activeVehicle && ped.downedTimer <= 0 && Math.abs(this.activeVehicle.forwardSpeed) > 4.5) {
         const d = Math.hypot(ped.x - this.activeVehicle.x, ped.z - this.activeVehicle.z);
@@ -1015,16 +1583,35 @@ export class GameEngine {
       }
     }
 
-    // Update Bullets
+    // Update Bullets (including building wall occlusion)
     for (let i = this.bullets.length - 1; i >= 0; i--) {
       const b = this.bullets[i];
       b.life -= dt;
+      const prevX = b.x;
+      const prevZ = b.z;
       b.x += b.vx * dt;
       b.z += b.vz * dt;
       b.mesh.position.set(b.x, b.y, b.z);
 
       let hit = false;
-      if (b.fromPlayer) {
+      const wallFrac = raycastCollidersFraction(
+        prevX,
+        b.y,
+        prevZ,
+        b.x,
+        b.y,
+        b.z,
+        this.city.colliders,
+        0.05,
+      );
+      if (wallFrac < 0.99) {
+        const hx = THREE.MathUtils.lerp(prevX, b.x, wallFrac);
+        const hz = THREE.MathUtils.lerp(prevZ, b.z, wallFrac);
+        this.spawnParticles(hx, b.y, hz, 3, true);
+        hit = true;
+      }
+
+      if (!hit && b.fromPlayer) {
         for (const enemy of this.missionEnemies) {
           if (enemy.downedTimer <= 0 && Math.hypot(enemy.x - b.x, enemy.z - b.z) < 0.9) {
             enemy.health -= 38;
@@ -1061,7 +1648,7 @@ export class GameEngine {
             }
           }
         }
-      } else {
+      } else if (!hit) {
         // Enemy bullet vs Player
         if (Math.hypot(this.player.x - b.x, this.player.z - b.z) < (this.activeVehicle ? 1.5 : 0.7)) {
           this.player.applyDamage(this.activeVehicle ? 4 : 9);
@@ -1144,7 +1731,7 @@ export class GameEngine {
       }
     }
 
-    // Update Camera
+    // Update Camera (Chase with Turn Framing & Collider Anti-Clipping OR Interior Cockpit)
     const targetHeading = this.activeVehicle ? this.activeVehicle.heading : this.player.heading;
     const speed = this.activeVehicle ? this.activeVehicle.forwardSpeed : 0;
     this.camRig.updateFollow(
@@ -1155,6 +1742,12 @@ export class GameEngine {
       speed,
       isLooking,
       this.activeVehicle ? this.activeVehicle.slipAngle : 0,
+      this.city.colliders,
+      activeSteerInput,
+      this.activeVehicle?.spec.cockpitOffset,
+      this.activeVehicle?.pitchAngle ?? 0,
+      this.activeVehicle?.rollAngle ?? 0,
+      this.player.isSprinting,
     );
 
     // Update Continuous Procedural Audio
@@ -1163,6 +1756,10 @@ export class GameEngine {
     const speedNorm = this.activeVehicle
       ? Math.min(1, Math.abs(this.activeVehicle.forwardSpeed) / this.activeVehicle.spec.maxSpeed)
       : 0;
+    const isHardBraking =
+      Boolean(this.activeVehicle) &&
+      (activeBrakeOnly || this.mobileInput.handbrakeHeld || this.desktopInput.isHeld('Space')) &&
+      Math.abs(speed) > 4;
     this.sound.updateContinuous(
       dt,
       Boolean(this.activeVehicle),
@@ -1173,6 +1770,7 @@ export class GameEngine {
       this.player.isSprinting,
       this.elapsed,
       this.activeVehicle?.rpm,
+      isHardBraking,
     );
 
     // Player Death Check
@@ -1186,25 +1784,21 @@ export class GameEngine {
   private updateContextualPrompt(): void {
     this.currentInteractPrompt = null;
     this.currentInteractAction = null;
+    this.inGarageZone = false;
 
     // 1. Check Gas Station / Garage / Shop
     for (const z of this.city.interactiveZones) {
       const d = Math.hypot(this.player.x - z.x, this.player.z - z.z);
       if (d <= z.radius) {
-        if (z.kind === 'gas' || z.kind === 'garage') {
+        if (z.kind === 'garage') {
+          this.inGarageZone = true;
+          this.currentInteractPrompt = `[E] ${z.label}`;
+          this.currentInteractAction = () => this.openGarage();
+          return;
+        } else if (z.kind === 'gas') {
           if (this.activeVehicle) {
             this.currentInteractPrompt = `[E] ${z.label}`;
-            this.currentInteractAction = () => {
-              if (!this.activeVehicle) return;
-              if (this.player.cash < 50) {
-                this.showToast('Precisas de $50 para reparar.');
-                return;
-              }
-              this.player.cash -= 50;
-              this.activeVehicle.health = this.activeVehicle.maxHealth;
-              this.sound.playMissionSuccess();
-              this.showToast('Veículo reparado e abastecido (-$50)!');
-            };
+            this.currentInteractAction = () => this.repairActiveVehicle();
             return;
           }
         } else if (z.kind === 'shop') {
@@ -1262,7 +1856,11 @@ export class GameEngine {
     const minimapEntities: MinimapEntity[] = [];
 
     for (const z of this.city.interactiveZones) {
-      minimapEntities.push({ x: z.x, z: z.z, kind: z.kind === 'shop' ? 'shop' : 'gas' });
+      minimapEntities.push({
+        x: z.x,
+        z: z.z,
+        kind: z.kind === 'shop' ? 'shop' : z.kind === 'garage' ? 'garage' : 'gas',
+      });
     }
 
     if (!this.missions.progress.activeMissionId) {
@@ -1283,9 +1881,14 @@ export class GameEngine {
     for (const v of this.vehicles) {
       if (v === this.activeVehicle) continue;
       if (v.isPolice && v.sirenActive) {
-        minimapEntities.push({ x: v.x, z: v.z, kind: 'police' });
-      } else if (Math.hypot(v.x - this.player.x, v.z - this.player.z) < 120) {
-        minimapEntities.push({ x: v.x, z: v.z, kind: v.aiActive ? 'traffic' : 'parked' });
+        minimapEntities.push({ x: v.x, z: v.z, kind: 'police', heading: v.heading });
+      } else if (Math.hypot(v.x - this.player.x, v.z - this.player.z) < 185) {
+        minimapEntities.push({
+          x: v.x,
+          z: v.z,
+          kind: v.aiActive ? 'traffic' : 'parked',
+          heading: v.heading,
+        });
       }
     }
 
@@ -1326,6 +1929,15 @@ export class GameEngine {
       vehicleHealth: this.activeVehicle
         ? Math.round((this.activeVehicle.health / this.activeVehicle.maxHealth) * 100)
         : 100,
+      vehicleGear: this.activeVehicle ? this.activeVehicle.gear : 1,
+      vehicleRpm: this.activeVehicle ? this.activeVehicle.rpm : 0,
+      isDrifting: this.activeVehicle ? this.activeVehicle.isDrifting : false,
+      isReversing: this.activeVehicle ? this.activeVehicle.forwardSpeed < -0.5 : false,
+      cameraMode: this.camRig.mode,
+      inGarageZone: this.inGarageZone,
+      garageOpen: this.garageOpen,
+      vehicleCatalog: this.vehicleCatalog,
+      savedVehicles: this.savedVehicles,
       district: getDistrictName(this.player.x, this.player.z),
       timeOfDayLabel: this.formatTimeOfDay(this.dayProgress),
       dayProgress: this.dayProgress,
@@ -1347,12 +1959,13 @@ export class GameEngine {
     });
   }
 
-  public triggerMobileAction(action: 'jump' | 'enterExit' | 'interact' | 'attack'): void {
+  public triggerMobileAction(action: 'jump' | 'enterExit' | 'interact' | 'attack' | 'toggleCamera'): void {
     this.sound.init();
     if (action === 'jump') this.mobileInput.jumpPressed = true;
     if (action === 'enterExit') this.mobileInput.enterExitPressed = true;
     if (action === 'interact') this.mobileInput.interactPressed = true;
     if (action === 'attack') this.mobileInput.attackPressed = true;
+    if (action === 'toggleCamera') this.toggleVehicleCameraMode();
   }
 
   private handleResize(): void {
@@ -1369,7 +1982,12 @@ export class GameEngine {
     window.removeEventListener('resize', this.onResizeBound);
     this.detachInput();
     this.timer.dispose();
+    this.player.dispose();
     this.sound.dispose();
+    this.vehicleLoader.disposeAll();
+    for (const url of this.importedObjectUrls) {
+      URL.revokeObjectURL(url);
+    }
     this.textures.dispose();
     this.renderer.dispose();
     if (this.renderer.domElement.parentNode === this.container) {

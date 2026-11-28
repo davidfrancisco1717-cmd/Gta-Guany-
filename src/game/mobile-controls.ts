@@ -6,6 +6,10 @@ export interface MobileInputState {
   sprintHeld: boolean;
   gasHeld: boolean;
   brakeHeld: boolean;
+  reverseHeld: boolean;
+  handbrakeHeld: boolean;
+  steerLeftHeld: boolean;
+  steerRightHeld: boolean;
   jumpPressed: boolean;
   enterExitPressed: boolean;
   interactPressed: boolean;
@@ -22,6 +26,10 @@ export function createMobileInputState(): MobileInputState {
     sprintHeld: false,
     gasHeld: false,
     brakeHeld: false,
+    reverseHeld: false,
+    handbrakeHeld: false,
+    steerLeftHeld: false,
+    steerRightHeld: false,
     jumpPressed: false,
     enterExitPressed: false,
     interactPressed: false,

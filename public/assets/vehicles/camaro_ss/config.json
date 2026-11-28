@@ -1,0 +1,14 @@
+{
+  "id": "camaro_ss",
+  "kind": "camaro",
+  "name": "Camaro SS V8",
+  "category": "Muscle Coupe",
+  "description": "Coupé V8 clássico amarelo com faixas desportivas pretas, binário elevado e tração traseira.",
+  "defaultColor": "#f5b800",
+  "previewUrl": "/assets/aistudio/camaro-1_272dea49.webp",
+  "modelUrl": null,
+  "orientationOffsetY": 0,
+  "targetLength": 4.68,
+  "cockpitOffset": { "x": 0.42, "y": 1.07, "z": 0.05 },
+  "wheelNames": ["wheel", "roda", "tire", "rim"]
+}

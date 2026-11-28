@@ -1,0 +1,14 @@
+{
+  "id": "bati_801",
+  "kind": "moto",
+  "name": "Bati 801",
+  "category": "Superbike",
+  "description": "Moto desportiva ágil com inclinação realista em curva e aceleração explosiva.",
+  "defaultColor": "#f97316",
+  "previewUrl": null,
+  "modelUrl": null,
+  "orientationOffsetY": 0,
+  "targetLength": 2.3,
+  "cockpitOffset": { "x": 0.0, "y": 1.24, "z": 0.14 },
+  "wheelNames": ["wheel", "roda", "tire", "rim"]
+}

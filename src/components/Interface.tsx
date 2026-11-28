@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import {
   ArrowLeft,
   BatteryCharging,
+  Camera,
   Car,
   CloudSun,
   Crosshair,
@@ -11,18 +12,23 @@ import {
   Pause,
   Play,
   RotateCcw,
+  RotateCw,
+  Save,
   Settings,
   Shield,
   ShieldAlert,
   ShoppingBag,
   Smartphone,
+  Trash2,
+  Upload,
   Volume2,
   VolumeX,
   Wifi,
+  Wrench,
   X,
 } from 'lucide-react';
 import { GameEngine } from '../game/game';
-import { GraphicsQuality, HudSnapshot, QUALITY_PRESETS } from '../game/types';
+import { GraphicsQuality, HudSnapshot, QUALITY_PRESETS, VEHICLE_SPECS, VehicleKind } from '../game/types';
 import { Minimap } from './Minimap';
 import { MobileControls } from './MobileControls';
 
@@ -38,6 +44,8 @@ export const Interface: React.FC<InterfaceProps> = ({ engine, hud }) => {
   const [pauseTab, setPauseTab] = useState<PauseTab>('missions');
   const [phoneOpen, setPhoneOpen] = useState(false);
   const [phoneApp, setPhoneApp] = useState<PhoneApp>('home');
+  const [importKind, setImportKind] = useState<VehicleKind>('mustang');
+  const [mustangUrl, setMustangUrl] = useState('');
 
   useEffect(() => {
     if (!engine || !hud) return;
@@ -150,7 +158,7 @@ export const Interface: React.FC<InterfaceProps> = ({ engine, hud }) => {
           </div>
 
           <div className="text-xs text-neutral-400 font-mono-num">
-            WASD Mover · Rato Câmara · F Veículo · E Interagir · T Telemóvel · 1-3 Armas · Esc Pausa
+            WASD Mover/Conduzir · F Veículo · C Câmara · G Garagem · E Interagir · T Telemóvel · Esc Pausa
           </div>
         </div>
       </div>
@@ -212,6 +220,32 @@ export const Interface: React.FC<InterfaceProps> = ({ engine, hud }) => {
           >
             <Gamepad2 className="w-4 h-4" />
           </button>
+          <button
+            type="button"
+            onClick={() => engine.openGarage()}
+            aria-label="Abrir Garagem (G)"
+            title="Garagem & Veículos (G)"
+            className={`h-9 px-2.5 rounded-md border inline-flex items-center gap-1.5 text-xs font-semibold cursor-pointer ${
+              hud.garageOpen || hud.inGarageZone
+                ? 'bg-violet-500 border-violet-300 text-white'
+                : 'bg-neutral-950/90 border-white/15 text-white hover:bg-neutral-900'
+            }`}
+          >
+            <Car className="w-3.5 h-3.5" />
+            <span className="hidden md:inline">Garagem</span>
+          </button>
+          {hud.inVehicle && !hud.touchControlsEnabled && (
+            <button
+              type="button"
+              onClick={() => engine.toggleVehicleCameraMode()}
+              aria-label="Alternar Câmara (C)"
+              title="Alternar Câmara Exterior / Interior (C)"
+              className="h-9 px-2.5 rounded-md bg-neutral-950/90 border border-white/15 text-sky-300 hover:bg-neutral-900 hidden sm:inline-flex items-center gap-1.5 text-xs font-semibold cursor-pointer"
+            >
+              <Camera className="w-3.5 h-3.5" />
+              <span>{hud.cameraMode === 'cockpit' ? 'Interior' : 'Exterior'}</span>
+            </button>
+          )}
         </div>
 
         {/* GTA-Style Top-Left Contextual Prompt (desktop only here; mobile sits bottom-center) */}
@@ -349,28 +383,42 @@ export const Interface: React.FC<InterfaceProps> = ({ engine, hud }) => {
         </div>
       )}
 
-      {/* Bottom-Right Vehicle Speedometer */}
+      {/* Vehicle Speedometer + Gear + RPM + Drift */}
       {hud.inVehicle && (
         <div
-          className={`absolute bg-neutral-950/90 border border-white/15 rounded-lg px-4 py-2 flex items-center gap-4 ${
-            phoneOpen
-              ? 'right-3 sm:right-60 bottom-4'
-              : hud.touchControlsEnabled
-                ? 'right-3 sm:right-4 bottom-44 sm:bottom-44'
+          className={`absolute bg-neutral-950/90 border border-white/15 rounded-lg px-3.5 py-2 flex items-center gap-3.5 ${
+            hud.touchControlsEnabled
+              ? 'left-1/2 -translate-x-1/2 bottom-3'
+              : phoneOpen
+                ? 'right-3 sm:right-60 bottom-4'
                 : 'right-3 sm:right-4 bottom-4'
           }`}
         >
           <div>
-            <div className="text-[11px] font-medium text-neutral-400">{hud.vehicleName}</div>
-            <div className="w-24 h-1.5 bg-neutral-800 rounded-sm overflow-hidden mt-1.5">
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] font-semibold text-neutral-300">{hud.vehicleName}</span>
+              {hud.isDrifting && (
+                <span className="text-[10px] font-bold text-amber-300 font-mono-num">DRIFT</span>
+              )}
+            </div>
+            <div className="w-24 h-1.5 bg-neutral-800 rounded-sm overflow-hidden mt-1">
               <div
                 className={`h-full ${hud.vehicleHealth > 35 ? 'bg-amber-400' : 'bg-rose-500'}`}
                 style={{ width: `${hud.vehicleHealth}%` }}
               />
             </div>
+            <div className="w-24 h-1 bg-neutral-800 rounded-sm overflow-hidden mt-1" title="RPM">
+              <div
+                className="h-full bg-sky-400 transition-all duration-75"
+                style={{ width: `${Math.round(hud.vehicleRpm * 100)}%` }}
+              />
+            </div>
           </div>
-          <div className="flex items-baseline gap-1">
-            <span className="font-display font-mono-num text-3xl font-bold text-white leading-none">
+          <div className="flex items-baseline gap-1.5">
+            <span className="font-mono-num text-xs font-bold text-sky-300">
+              {hud.isReversing ? 'R' : `${hud.vehicleGear}ª`}
+            </span>
+            <span className="font-display font-mono-num text-2xl sm:text-3xl font-bold text-white leading-none">
               {hud.speedKmh}
             </span>
             <span className="text-[11px] font-semibold text-amber-400">km/h</span>
@@ -450,6 +498,19 @@ export const Interface: React.FC<InterfaceProps> = ({ engine, hud }) => {
                     {hud.muted ? 'Mudo' : 'Áudio'}
                   </span>
                 </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPhoneOpen(false);
+                    engine.openGarage();
+                  }}
+                  className="flex flex-col items-center gap-1 p-1.5 rounded-lg hover:bg-white/5 cursor-pointer"
+                >
+                  <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-violet-600 text-white">
+                    <Car className="w-5 h-5" />
+                  </div>
+                  <span className="text-[10px] font-medium text-neutral-200">Garagem</span>
+                </button>
               </div>
             )}
 
@@ -491,7 +552,7 @@ export const Interface: React.FC<InterfaceProps> = ({ engine, hud }) => {
                   <div className="flex items-center justify-between text-xs font-bold text-sky-300">
                     <span className="flex items-center gap-1.5">
                       <Car className="w-3.5 h-3.5" />
-                      Mecânico: Comet GT
+                      Mecânico: Lexus LC 500
                     </span>
                     <span className="font-mono-num">$100</span>
                   </div>
@@ -618,7 +679,11 @@ export const Interface: React.FC<InterfaceProps> = ({ engine, hud }) => {
       )}
 
       {/* Toast & Mobile Interaction Banner */}
-      <div className="absolute bottom-6 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2">
+      <div
+        className={`absolute left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 ${
+          hud.touchControlsEnabled ? 'top-14' : 'bottom-6'
+        }`}
+      >
         {hud.toastMessage && (
           <div className="bg-neutral-950/92 border border-amber-400/40 rounded-lg px-4 py-2 text-xs sm:text-sm font-medium text-amber-200 whitespace-nowrap">
             {hud.toastMessage}
@@ -632,8 +697,299 @@ export const Interface: React.FC<InterfaceProps> = ({ engine, hud }) => {
       </div>
 
       {/* Mobile Touch Controls */}
-      {hud.phase === 'playing' && hud.touchControlsEnabled && (
+      {hud.phase === 'playing' && !hud.garageOpen && hud.touchControlsEnabled && (
         <MobileControls engine={engine} hud={hud} />
+      )}
+
+      {/* GARAGE & VEHICLE SELECTOR MODAL */}
+      {hud.phase === 'playing' && hud.garageOpen && (
+        <div className="absolute inset-0 z-40 bg-neutral-950/88 flex items-center justify-center p-3 sm:p-5 pointer-events-auto">
+          <div className="w-full max-w-4xl bg-neutral-900 border border-white/15 rounded-xl overflow-hidden shadow-2xl flex flex-col max-h-[92vh]">
+            <div className="flex flex-wrap items-center justify-between gap-2 px-4 sm:px-5 py-3 border-b border-white/10 bg-neutral-950/60">
+              <div className="flex items-center gap-3">
+                <Car className="w-5 h-5 text-violet-400" />
+                <h2 className="font-display text-base sm:text-lg font-bold text-white">
+                  Garagem & Frota de Veículos
+                </h2>
+                <span className="font-mono-num text-sm font-semibold text-emerald-400">${hud.cash}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => engine.saveActiveVehicleToGarage()}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-xs font-bold cursor-pointer"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  Guardar Veículo
+                </button>
+                <button
+                  type="button"
+                  onClick={() => engine.repairActiveVehicle()}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-amber-300 text-xs font-bold border border-white/10 cursor-pointer"
+                >
+                  <Wrench className="w-3.5 h-3.5" />
+                  Reparar $50
+                </button>
+                <button
+                  type="button"
+                  onClick={() => engine.closeGarage()}
+                  className="p-1.5 rounded-lg text-neutral-400 hover:text-white hover:bg-white/10 cursor-pointer"
+                  aria-label="Fechar Garagem"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            <div className="p-4 sm:p-5 overflow-y-auto flex-1 flex flex-col gap-5">
+              {/* Saved Garage Slots */}
+              {hud.savedVehicles.length > 0 && (
+                <div>
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-violet-300 mb-2">
+                    Veículos Guardados ({hud.savedVehicles.length})
+                  </h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                    {hud.savedVehicles.map((slot) => (
+                      <div
+                        key={slot.slotId}
+                        className="p-3 rounded-lg bg-neutral-950/75 border border-violet-500/30 flex items-center justify-between gap-2"
+                      >
+                        <div className="min-w-0 flex items-center gap-2.5">
+                          <span
+                            className="w-4 h-4 rounded-full border border-white/40 shrink-0"
+                            style={{ backgroundColor: `#${slot.color.toString(16).padStart(6, '0')}` }}
+                          />
+                          <div className="min-w-0">
+                            <div className="text-xs font-bold text-white truncate">{slot.name}</div>
+                            <div className="text-[10px] text-neutral-400 font-mono-num">
+                              Guardado às {slot.savedAtLabel}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => void engine.retrieveSavedVehicle(slot.slotId)}
+                            className="px-2.5 py-1.5 rounded bg-amber-400 hover:bg-amber-300 text-neutral-950 text-[11px] font-bold cursor-pointer"
+                          >
+                            Retirar
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => engine.removeSavedVehicle(slot.slotId)}
+                            aria-label="Remover veículo guardado"
+                            className="p-1.5 rounded bg-neutral-800 hover:bg-rose-600/80 text-neutral-300 hover:text-white cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Vehicle Catalog Grid */}
+              <div>
+                <h3 className="text-xs font-bold uppercase tracking-wider text-amber-300 mb-2">
+                  Catálogo de Modelos Disponíveis
+                </h3>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {hud.vehicleCatalog.map((item) => {
+                    const spec = VEHICLE_SPECS[item.kind];
+                    const speedPct = Math.round((spec.maxSpeed / 46) * 100);
+                    const accelPct = Math.round((spec.accel / 30) * 100);
+                    const gripPct = Math.round((spec.grip / 10) * 100);
+                    return (
+                      <div
+                        key={item.id}
+                        className="rounded-xl bg-neutral-950/80 border border-white/10 overflow-hidden flex flex-col justify-between"
+                      >
+                        <div>
+                          {item.previewUrl ? (
+                            <div className="h-28 w-full bg-neutral-900 overflow-hidden">
+                              <img
+                                src={item.previewUrl}
+                                alt={item.name}
+                                className="w-full h-full object-cover"
+                              />
+                            </div>
+                          ) : (
+                            <div className="h-14 px-3.5 flex items-center justify-between bg-neutral-900/90 border-b border-white/5">
+                              <span className="text-[11px] font-semibold text-neutral-300">
+                                {item.category}
+                              </span>
+                              <span
+                                className="w-5 h-5 rounded-full border border-white/40"
+                                style={{ backgroundColor: item.defaultColor }}
+                              />
+                            </div>
+                          )}
+                          <div className="p-3.5">
+                            <div className="flex items-center justify-between gap-2">
+                              <h4 className="text-sm font-bold text-white">{item.name}</h4>
+                              <span className="text-[10px] font-mono-num text-amber-400">
+                                {spec.gears} vel.
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-neutral-400 mt-1 line-clamp-2">
+                              {item.description}
+                            </p>
+                            <div className="mt-2.5 flex flex-col gap-1 text-[10px] text-neutral-400 font-mono-num">
+                              <div className="flex items-center gap-2">
+                                <span className="w-14">Vel. Máx</span>
+                                <div className="flex-1 h-1.5 bg-neutral-800 rounded-sm overflow-hidden">
+                                  <div className="h-full bg-amber-400" style={{ width: `${speedPct}%` }} />
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="w-14">Aceleração</span>
+                                <div className="flex-1 h-1.5 bg-neutral-800 rounded-sm overflow-hidden">
+                                  <div className="h-full bg-emerald-400" style={{ width: `${accelPct}%` }} />
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="w-14">Aderência</span>
+                                <div className="flex-1 h-1.5 bg-neutral-800 rounded-sm overflow-hidden">
+                                  <div className="h-full bg-sky-400" style={{ width: `${gripPct}%` }} />
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="px-3.5 pb-3.5 flex flex-col gap-2">
+                          {item.kind === 'mustang' && (
+                            <div className="flex flex-col gap-1.5 p-2 rounded-lg bg-neutral-900/90 border border-rose-500/25">
+                              <div className="flex items-center justify-between gap-2 text-[10px]">
+                                <span className="font-semibold text-neutral-300">
+                                  {item.modelUrl ? 'GLB/GLTF Externo Ativo' : 'Importar Modelo Real (.GLB/.GLTF)'}
+                                </span>
+                                {item.modelUrl && (
+                                  <button
+                                    type="button"
+                                    onClick={() => void engine.rotateMustangModel(1)}
+                                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-neutral-800 hover:bg-neutral-700 text-amber-300 font-semibold border border-white/10 cursor-pointer"
+                                    title="Rodar orientação do Mustang 90°"
+                                  >
+                                    <RotateCw className="w-3 h-3" />
+                                    Rodar 90°
+                                  </button>
+                                )}
+                              </div>
+                              <label className="w-full py-1.5 px-2.5 rounded-md bg-rose-600 hover:bg-rose-500 text-white font-display text-[11px] font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer">
+                                <Upload className="w-3.5 h-3.5" />
+                                {item.modelUrl ? 'Trocar .GLB / .GLTF' : 'Carregar .GLB / .GLTF'}
+                                <input
+                                  type="file"
+                                  accept=".glb,.gltf,.bin,.png,.jpg,.jpeg,.webp"
+                                  multiple
+                                  className="hidden"
+                                  data-testid="mustang-gltf-input"
+                                  onChange={(e) => {
+                                    const files = e.target.files;
+                                    if (!files || files.length === 0) return;
+                                    void engine.importMustangModel(Array.from(files), { autoDrive: true });
+                                    e.target.value = '';
+                                  }}
+                                />
+                              </label>
+                            </div>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => void engine.spawnCatalogVehicle(item.id)}
+                            className="w-full py-2 rounded-lg bg-amber-400 hover:bg-amber-300 text-neutral-950 font-display text-xs font-bold cursor-pointer"
+                          >
+                            Selecionar &amp; Conduzir
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Runtime GLB / GLTF Importer */}
+              <div className="p-3.5 rounded-xl bg-neutral-950/70 border border-white/10 flex flex-col gap-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
+                      <Upload className="w-3.5 h-3.5 text-sky-400" />
+                      Importar Modelo 3D (.GLB / .GLTF)
+                    </h4>
+                    <p className="text-[11px] text-neutral-400 mt-0.5">
+                      Carrega ficheiros .glb ou .gltf (+ .bin/texturas) ou cola um URL .glb para substituir o Mustang mantendo as proporções 1:1 reais.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <select
+                      value={importKind}
+                      onChange={(e) => setImportKind(e.target.value as VehicleKind)}
+                      className="h-9 px-2.5 rounded-lg bg-neutral-900 border border-white/15 text-xs text-white"
+                      aria-label="Perfil de Física"
+                    >
+                      <option value="mustang">Mustang GT 5.0</option>
+                      <option value="camaro">Camaro / Muscle</option>
+                      <option value="challenger">Dodge Challenger 2015 LB</option>
+                      <option value="sports">Lexus LC 500 Convertible</option>
+                      <option value="sedan">Berlina</option>
+                      <option value="suv">SUV</option>
+                      <option value="van">Carrinha</option>
+                      <option value="moto">Moto</option>
+                      <option value="police">Polícia</option>
+                    </select>
+                    <label className="h-9 px-3.5 rounded-lg bg-sky-500 hover:bg-sky-400 text-neutral-950 font-display text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap">
+                      <Upload className="w-3.5 h-3.5" />
+                      Abrir .GLB / .GLTF
+                      <input
+                        type="file"
+                        accept=".glb,.gltf,.bin,.png,.jpg,.jpeg,.webp"
+                        multiple
+                        className="hidden"
+                        onChange={(e) => {
+                          const files = e.target.files;
+                          if (!files || files.length === 0) return;
+                          if (importKind === 'mustang') {
+                            void engine.importMustangModel(Array.from(files), { autoDrive: true });
+                          } else {
+                            const file = files[0];
+                            const url = URL.createObjectURL(file);
+                            void engine.importCustomGltfVehicle(file.name, url, importKind);
+                          }
+                          e.target.value = '';
+                        }}
+                      />
+                    </label>
+                  </div>
+                </div>
+                <form
+                  className="flex flex-col sm:flex-row gap-2"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const trimmed = mustangUrl.trim();
+                    if (!trimmed) return;
+                    void engine.importMustangModel(trimmed, { autoDrive: true });
+                  }}
+                >
+                  <input
+                    type="url"
+                    value={mustangUrl}
+                    onChange={(e) => setMustangUrl(e.target.value)}
+                    placeholder="https://.../mustang_gt.glb (URL direto .glb ou .gltf para o Mustang)"
+                    className="flex-1 h-9 px-3 rounded-lg bg-neutral-900 border border-white/15 text-xs text-white placeholder:text-neutral-500"
+                  />
+                  <button
+                    type="submit"
+                    className="h-9 px-3.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-white font-display text-xs font-bold border border-white/15 cursor-pointer whitespace-nowrap"
+                  >
+                    Importar URL Mustang
+                  </button>
+                </form>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* PAUSE / INVENTORY / MISSIONS / SETTINGS MODAL */}
@@ -874,7 +1230,7 @@ export const Interface: React.FC<InterfaceProps> = ({ engine, hud }) => {
                     />
                   </div>
                   <div className="text-xs text-neutral-400 leading-relaxed">
-                    PC: WASD Mover/Conduzir · Shift Correr · Espaço Saltar/Travão de Mão · F Entrar/Sair de Veículo · E Interagir · H Buzina · Botão Esq. Atacar · Arrastar Rato Câmara.
+                    PC: WASD Mover/Conduzir · Shift Correr · Espaço Saltar/Travão de Mão · F Entrar/Sair de Veículo · C Câmara Exterior/Interior · G Garagem · E Interagir · H Buzina · Botão Esq. Atacar · Arrastar Rato Câmara.
                   </div>
                 </div>
               )}

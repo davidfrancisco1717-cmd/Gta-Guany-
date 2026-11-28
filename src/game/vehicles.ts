@@ -4,10 +4,15 @@ import { ROAD_COORDS } from './city';
 import { resolveCircleWorldCollisions, vehicleSurfaceHeightAt } from './physics';
 import { ProceduralTextureSet } from './textures';
 
+import { NormalizedWheelTemplate, VehicleAssetLoader, VehicleModelTemplate } from './vehicleLoader';
+import { buildCamaroSSModel } from './camaroModel';
+import { buildMustangGTModel } from './mustangModel';
+
 export interface VehicleInput {
-  throttle: number; // -1..1
+  throttle: number; // -1..1 (reverse .. forward)
   steer: number; // -1..1 (positive = left, negative = right)
   handbrake: boolean;
+  brakeOnly?: boolean; // when true (dedicated mobile TRAVAR), decelerates toward 0 without reversing
 }
 
 export interface WheelNode {
@@ -21,9 +26,13 @@ export interface WheelNode {
 
 export interface VehicleInstance {
   id: string;
+  catalogId: string;
+  customModelUrl?: string;
+  paintColor: number;
   spec: VehicleSpec;
   group: THREE.Group;
   bodyGroup: THREE.Group;
+  driverGroup: THREE.Group;
   wheelNodes: WheelNode[];
   wheelMeshes: THREE.Object3D[];
   frontSteerPivots: THREE.Object3D[];
@@ -69,6 +78,9 @@ export interface VehicleInstance {
   aiDir: 1 | -1;
   aiLaneCoord: number;
   aiTargetSpeed: number;
+  aiTurnCooldown?: number;
+  collisionStunTimer?: number;
+  hornCooldown?: number;
 }
 
 const SPORTS_COLORS = [0xdc2626, 0x0f172a, 0xf8fafc, 0xf59e0b, 0x0284c7, 0x7c3aed];
@@ -137,24 +149,24 @@ function getSharedMaterials(): SharedCarMaterials {
   return sharedMats;
 }
 
-function getPaintMaterial(color: number, reflections: boolean): THREE.Material {
-  const key = `${color}_${reflections ? 'r' : 's'}`;
+function getPaintMaterial(color: number, reflections: boolean, isCamaro = false): THREE.Material {
+  const key = `${color}_${reflections ? 'r' : 's'}_${isCamaro ? 'c' : 'g'}`;
   const cached = paintMatCache.get(key);
   if (cached) return cached;
 
   const mat = reflections
     ? new THREE.MeshPhysicalMaterial({
         color,
-        metalness: 0.7,
-        roughness: 0.16,
-        clearcoat: 1.0,
-        clearcoatRoughness: 0.05,
-        envMapIntensity: 1.3,
+        metalness: isCamaro ? 0.18 : 0.7,
+        roughness: isCamaro ? 0.28 : 0.16,
+        clearcoat: isCamaro ? 0.85 : 1.0,
+        clearcoatRoughness: isCamaro ? 0.12 : 0.05,
+        envMapIntensity: isCamaro ? 0.65 : 1.3,
       })
     : new THREE.MeshStandardMaterial({
         color,
-        metalness: 0.52,
-        roughness: 0.24,
+        metalness: isCamaro ? 0.18 : 0.52,
+        roughness: isCamaro ? 0.28 : 0.24,
       });
   paintMatCache.set(key, mat);
   return mat;
@@ -223,11 +235,11 @@ function getLowerChassisGeometry(kind: VehicleKind, halfWidth: number, halfLengt
   return cachedGeo(`lower_${kind}_${halfWidth.toFixed(2)}_${halfLength.toFixed(2)}`, () => {
     const s = new THREE.Shape();
     const L = halfLength;
-    const base = kind === 'suv' ? 0.34 : kind === 'sports' ? 0.2 : 0.24;
-    const hoodTop = kind === 'suv' ? 0.96 : kind === 'sports' ? 0.68 : 0.78;
-    const beltY = kind === 'suv' ? 1.04 : kind === 'sports' ? 0.78 : 0.86;
-    const noseY = kind === 'suv' ? 0.72 : kind === 'sports' ? 0.44 : 0.56;
-    const trunkY = kind === 'suv' ? 1.02 : kind === 'sports' ? 0.82 : 0.88;
+    const base = kind === 'suv' ? 0.34 : kind === 'sports' || kind === 'camaro' ? 0.2 : 0.24;
+    const hoodTop = kind === 'suv' ? 0.96 : kind === 'sports' || kind === 'camaro' ? 0.72 : 0.78;
+    const beltY = kind === 'suv' ? 1.04 : kind === 'camaro' ? 0.84 : kind === 'sports' ? 0.78 : 0.86;
+    const noseY = kind === 'suv' ? 0.72 : kind === 'camaro' ? 0.52 : kind === 'sports' ? 0.44 : 0.56;
+    const trunkY = kind === 'suv' ? 1.02 : kind === 'camaro' ? 0.87 : kind === 'sports' ? 0.82 : 0.88;
 
     s.moveTo(-L + 0.08, base);
     s.lineTo(L - 0.1, base);
@@ -267,9 +279,9 @@ function getSideFlankGeometry(
     `flank_${kind}_${halfLength.toFixed(2)}_${wheelZ.toFixed(2)}_${wheelR.toFixed(2)}`,
     () => {
       const L = halfLength;
-      const base = kind === 'suv' ? 0.34 : kind === 'sports' ? 0.2 : 0.24;
-      const beltY = kind === 'suv' ? 1.04 : kind === 'sports' ? 0.78 : 0.86;
-      const noseY = kind === 'suv' ? 0.72 : kind === 'sports' ? 0.44 : 0.56;
+      const base = kind === 'suv' ? 0.34 : kind === 'sports' || kind === 'camaro' ? 0.2 : 0.24;
+      const beltY = kind === 'suv' ? 1.04 : kind === 'camaro' ? 0.84 : kind === 'sports' ? 0.78 : 0.86;
+      const noseY = kind === 'suv' ? 0.72 : kind === 'camaro' ? 0.52 : kind === 'sports' ? 0.44 : 0.56;
       const archR = wheelR + (kind === 'suv' ? 0.11 : 0.085);
       const archY = wheelR;
 
@@ -430,7 +442,10 @@ export function createVehicle(
 
   let paintColor = customColor ?? 0xdc2626;
   if (customColor === undefined) {
-    if (kind === 'sports') paintColor = SPORTS_COLORS[Math.floor(Math.random() * SPORTS_COLORS.length)];
+    if (kind === 'camaro') paintColor = 0xea9600;
+    else if (kind === 'mustang') paintColor = 0xdc1e1e;
+    else if (kind === 'challenger') paintColor = 0x18181b;
+    else if (kind === 'sports') paintColor = SPORTS_COLORS[Math.floor(Math.random() * SPORTS_COLORS.length)];
     else if (kind === 'sedan') paintColor = SEDAN_COLORS[Math.floor(Math.random() * SEDAN_COLORS.length)];
     else if (kind === 'suv') paintColor = SUV_COLORS[Math.floor(Math.random() * SUV_COLORS.length)];
     else if (kind === 'moto') paintColor = 0x1d4ed8;
@@ -439,7 +454,39 @@ export function createVehicle(
   }
 
   const mats = getSharedMaterials();
-  const paintMat = getPaintMaterial(paintColor, reflections);
+  const paintMat = getPaintMaterial(
+    paintColor,
+    reflections,
+    kind === 'camaro' || kind === 'mustang' || kind === 'challenger',
+  );
+
+  // Seated Driver Silhouette (visible when player is driving in exterior chase camera)
+  const driverGroup = new THREE.Group();
+  driverGroup.visible = false;
+  const drvShirtMat = new THREE.MeshStandardMaterial({ color: 0x33362c, roughness: 0.62 });
+  const drvSkinMat = new THREE.MeshStandardMaterial({ color: 0xd49f7e, roughness: 0.62 });
+  const drvHairMat = new THREE.MeshStandardMaterial({ color: 0x241c17, roughness: 0.84 });
+  const drvTorso = new THREE.Mesh(cachedGeo('drv_torso', () => new THREE.CapsuleGeometry(0.16, 0.24, 4, 8)), drvShirtMat);
+  const drvHead = new THREE.Mesh(cachedGeo('drv_head', () => new THREE.SphereGeometry(0.135, 10, 8)), drvSkinMat);
+  const drvHair = new THREE.Mesh(
+    cachedGeo('drv_hair', () => new THREE.SphereGeometry(0.14, 8, 8, 0, Math.PI * 2, 0, Math.PI * 0.55)),
+    drvHairMat,
+  );
+  if (kind === 'moto') {
+    drvTorso.position.set(0, 1.05, -0.14);
+    drvTorso.rotation.x = 0.34;
+    drvHead.position.set(0, 1.38, -0.02);
+  } else {
+    const drvY = kind === 'suv' ? 0.84 : kind === 'van' ? 1.02 : 0.72;
+    const drvZ = kind === 'van' ? 0.3 : -0.04;
+    drvTorso.position.set(0.42, drvY, drvZ);
+    drvTorso.rotation.x = -0.15;
+    drvHead.position.set(0.42, drvY + 0.34, drvZ - 0.03);
+  }
+  drvHair.position.set(0, 0.02, -0.01);
+  drvHead.add(drvHair);
+  driverGroup.add(drvTorso, drvHead);
+  bodyGroup.add(driverGroup);
 
   // Per-vehicle dynamic lighting materials
   const headlightMat = new THREE.MeshStandardMaterial({
@@ -528,11 +575,11 @@ export function createVehicle(
     rimBack.position.x = -thickness * 0.14;
     wheelObj.add(rimBack);
 
-    // Multi-Spoke Alloy Rim (6 rugged spokes on SUV, 5 twin-spokes on Sports/Sedan)
+    // Multi-Spoke Alloy Rim (6 rugged spokes on SUV, 5 bold dark/machined spokes on Camaro/Sports)
     const spokeCount = kind === 'suv' || kind === 'van' ? 6 : 5;
-    const spokeMat = kind === 'sports' ? mats.darkAlloyMat : mats.alloyMat;
+    const spokeMat = kind === 'sports' || kind === 'camaro' ? mats.darkAlloyMat : mats.alloyMat;
     const spokeGeo = cachedGeo(`spoke_${r.toFixed(3)}_${spokeCount}`, () => {
-      return new THREE.BoxGeometry(0.035, r * 0.56, r * 0.11);
+      return new THREE.BoxGeometry(0.035, r * 0.56, kind === 'camaro' ? r * 0.16 : r * 0.11);
     });
     const outerFaceX = thickness * 0.36;
 
@@ -592,7 +639,7 @@ export function createVehicle(
       });
       const caliper = new THREE.Mesh(
         caliperGeo,
-        kind === 'sports' ? mats.caliperRedMat : mats.caliperSteelMat,
+        kind === 'sports' || kind === 'camaro' ? mats.caliperRedMat : mats.caliperSteelMat,
       );
       caliper.position.set(sign * thickness * 0.12, r * 0.16, isFront ? -r * 0.28 : r * 0.28);
       pivot.add(caliper);
@@ -866,19 +913,68 @@ export function createVehicle(
       rTurn.position.set(lx, 1.06, -L + 0.01);
       bodyGroup.add(rTurn);
     }
+  } else if (kind === 'camaro') {
+    const camaroRes = buildCamaroSSModel(spec, group, bodyGroup, {
+      paintMat,
+      trimMat: mats.trimMat,
+      chromeMat: mats.chromeMat,
+      alloyMat: mats.alloyMat,
+      darkAlloyMat: mats.darkAlloyMat,
+      tireMat: mats.tireMat,
+      rotorMat: mats.rotorMat,
+      caliperRedMat: mats.caliperRedMat,
+      carbonMat: mats.carbonMat,
+      interiorMat: mats.interiorMat,
+      seatMat: mats.seatMat,
+      glassMat: mats.glassMat,
+      headlightMat,
+      taillightMat,
+      brakeLightMat,
+      reverseLightMat,
+      turnLeftMat,
+      turnRightMat,
+    });
+    wheelNodes.push(...camaroRes.wheelNodes);
+    wheelMeshes.push(...camaroRes.wheelMeshes);
+    frontSteerPivots.push(...camaroRes.frontSteerPivots);
+  } else if (kind === 'mustang') {
+    const mustangRes = buildMustangGTModel(spec, group, bodyGroup, {
+      paintMat,
+      trimMat: mats.trimMat,
+      chromeMat: mats.chromeMat,
+      alloyMat: mats.alloyMat,
+      darkAlloyMat: mats.darkAlloyMat,
+      tireMat: mats.tireMat,
+      rotorMat: mats.rotorMat,
+      caliperRedMat: mats.caliperRedMat,
+      carbonMat: mats.carbonMat,
+      interiorMat: mats.interiorMat,
+      seatMat: mats.seatMat,
+      glassMat: mats.glassMat,
+      headlightMat,
+      taillightMat,
+      brakeLightMat,
+      reverseLightMat,
+      turnLeftMat,
+      turnRightMat,
+    });
+    wheelNodes.push(...mustangRes.wheelNodes);
+    wheelMeshes.push(...mustangRes.wheelMeshes);
+    frontSteerPivots.push(...mustangRes.frontSteerPivots);
   } else {
     // -------------------------------------------------------------------------
     // REALISTIC MULTI-PART CAR (Sports, Sedan, SUV, Police Interceptor)
     // -------------------------------------------------------------------------
+    const isCamaro = false;
     const isSports = kind === 'sports';
     const isSuv = kind === 'suv';
     const isPolice = kind === 'police';
 
     const w = spec.halfWidth * 2;
     const L = spec.halfLength;
-    const wheelZ = L * (isSports ? 0.63 : 0.61);
+    const wheelZ = L * (isSports || isCamaro ? 0.63 : 0.61);
     const wheelX = spec.halfWidth - 0.14;
-    const wheelW = isSports ? 0.31 : isSuv ? 0.3 : 0.27;
+    const wheelW = isSports || isCamaro ? 0.32 : isSuv ? 0.3 : 0.27;
 
     addWheel(-wheelX, spec.wheelRadius, wheelZ, true, wheelW);
     addWheel(wheelX, spec.wheelRadius, wheelZ, true, wheelW);
@@ -886,10 +982,10 @@ export function createVehicle(
     addWheel(wheelX, spec.wheelRadius, -wheelZ, false, wheelW + 0.02);
 
     // Proportions tuned per vehicle class
-    const baseClearance = isSuv ? 0.34 : isSports ? 0.2 : 0.24;
-    const beltY = isSuv ? 1.04 : isSports ? 0.78 : 0.86;
-    const roofY = isSuv ? 1.68 : isSports ? 1.24 : 1.38;
-    const cabHalfW = spec.halfWidth * (isSuv ? 0.8 : isSports ? 0.76 : 0.78);
+    const baseClearance = isSuv ? 0.34 : isSports || isCamaro ? 0.2 : 0.24;
+    const beltY = isSuv ? 1.04 : isCamaro ? 0.84 : isSports ? 0.78 : 0.86;
+    const roofY = isSuv ? 1.68 : isCamaro ? 1.29 : isSports ? 1.24 : 1.38;
+    const cabHalfW = spec.halfWidth * (isSuv ? 0.8 : isSports || isCamaro ? 0.76 : 0.78);
 
     // 1. Sculpted Lower Core Body (recessed inward so tires sit cleanly inside deep wheel arches)
     const lowerHull = new THREE.Mesh(getLowerChassisGeometry(kind, spec.halfWidth, L), paintMat);
@@ -954,17 +1050,17 @@ export function createVehicle(
       skirt.position.set(side * (spec.halfWidth - (isSuv ? 0.02 : 0.05)), baseClearance + 0.01, 0);
       bodyGroup.add(skirt);
 
-      // Chrome / Body Door Handles (2 for Sports, 4 for Sedan/SUV/Police)
+      // Chrome / Body Door Handles (2 for Sports/Camaro, 4 for Sedan/SUV/Police)
       const handleMat = isSports ? paintMat : mats.chromeMat;
       const handleGeo = cachedGeo('handle', () => new THREE.BoxGeometry(0.05, 0.036, 0.18));
-      const handleOffsets = isSports ? [0.05] : [0.32, -0.45];
+      const handleOffsets = isSports || isCamaro ? [0.05] : [0.32, -0.45];
       for (const hz of handleOffsets) {
         const handle = new THREE.Mesh(handleGeo, handleMat);
         handle.position.set(side * (spec.halfWidth + 0.01), beltY - 0.11, hz);
         bodyGroup.add(handle);
       }
 
-      // Sports Car Side Aero Intake Scoop behind door
+      // Sports Car Side Aero Intake Scoop / Camaro Rear Quarter Gill Louvers
       if (isSports) {
         const scoop = new THREE.Mesh(
           cachedGeo('sports_scoop', () => new THREE.BoxGeometry(0.07, 0.24, 0.36)),
@@ -972,6 +1068,24 @@ export function createVehicle(
         );
         scoop.position.set(side * (spec.halfWidth - 0.02), beltY - 0.24, -wheelZ + spec.wheelRadius + 0.22);
         bodyGroup.add(scoop);
+      } else if (isCamaro) {
+        // Side gill louvers ahead of rear wheel arch (matches Camaro renders)
+        for (const gz of [-0.62, -0.74, -0.86]) {
+          const gill = new THREE.Mesh(
+            cachedGeo('camaro_gill', () => new THREE.BoxGeometry(0.04, 0.22, 0.04)),
+            mats.trimMat,
+          );
+          gill.position.set(side * (spec.halfWidth - 0.01), baseClearance + 0.24, gz);
+          gill.rotation.x = 0.24;
+          bodyGroup.add(gill);
+        }
+        // Brushed chrome CAMARO fender badge
+        const fenderBadge = new THREE.Mesh(
+          cachedGeo('camaro_fbadge', () => new THREE.BoxGeometry(0.03, 0.045, 0.28)),
+          mats.chromeMat,
+        );
+        fenderBadge.position.set(side * (spec.halfWidth + 0.006), beltY - 0.18, wheelZ - 0.56);
+        bodyGroup.add(fenderBadge);
       }
     }
 
@@ -999,7 +1113,7 @@ export function createVehicle(
       }
     }
 
-    // 4. Contoured Sculpted Hood + Power Dome / Vents
+    // 4. Contoured Sculpted Hood + Power Dome / Camaro Twin Racing Stripes & Mail-Slot Scoop
     const hoodLen = L * 0.62;
     const hoodW = w * 0.78;
     const hood = new THREE.Mesh(getHoodGeometry(hoodLen, hoodW), paintMat);
@@ -1007,13 +1121,38 @@ export function createVehicle(
     bodyGroup.add(hood);
 
     if (isSports) {
-      // Twin hood extractor vents
       for (const vx of [-0.34, 0.34]) {
         const vent = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.03, 0.32), mats.carbonMat);
         vent.position.set(vx, beltY + 0.01, L * 0.54);
         vent.rotation.x = 0.08;
         bodyGroup.add(vent);
       }
+    } else if (isCamaro) {
+      // Twin Gloss-Black Rally Racing Stripes + Thin Outer Pinstripes on Hood
+      for (const sx of [-0.26, 0.26]) {
+        const stripe = new THREE.Mesh(
+          cachedGeo('camaro_hood_stripe', () => new THREE.BoxGeometry(0.32, 0.018, hoodLen * 0.92)),
+          mats.trimMat,
+        );
+        stripe.position.set(sx, beltY - 0.008, L * 0.57);
+        stripe.rotation.x = 0.075;
+        bodyGroup.add(stripe);
+
+        const pin = new THREE.Mesh(
+          cachedGeo('camaro_hood_pin', () => new THREE.BoxGeometry(0.03, 0.018, hoodLen * 0.92)),
+          mats.trimMat,
+        );
+        pin.position.set(sx + (sx > 0 ? 0.21 : -0.21), beltY - 0.01, L * 0.57);
+        pin.rotation.x = 0.075;
+        bodyGroup.add(pin);
+      }
+      // Iconic Camaro SS Mail-Slot Front Hood Scoop
+      const scoopBezel = new THREE.Mesh(
+        cachedGeo('camaro_scoop_bezel', () => new THREE.BoxGeometry(0.56, 0.048, 0.14)),
+        mats.trimMat,
+      );
+      scoopBezel.position.set(0, beltY - 0.065, L - 0.14);
+      bodyGroup.add(scoopBezel);
     }
 
     // 5. Wrap-Around Front & Rear Bumpers + Splitter + Diffuser
@@ -1023,18 +1162,18 @@ export function createVehicle(
 
     const frontLip = new THREE.Mesh(
       getBumperGeometry(w * 0.98, 0.08, 0.26),
-      isSuv ? mats.alloyMat : isSports ? mats.carbonMat : mats.trimMat,
+      isSuv ? mats.alloyMat : isSports || isCamaro ? mats.carbonMat : mats.trimMat,
     );
     frontLip.position.set(0, baseClearance - 0.01, L - 0.08);
     bodyGroup.add(frontLip);
 
-    // Front Grille Surround (Chrome/Dark) + Inner Grille Slats
-    const grilleW = w * (isSuv ? 0.58 : 0.54);
-    const grilleH = isSuv ? 0.26 : isSports ? 0.18 : 0.22;
-    const grilleY = baseClearance + (isSuv ? 0.34 : 0.24);
+    // Front Grille Surround (Chrome/Dark) + Inner Grille Slats + Lower Air Dam
+    const grilleW = w * (isSuv ? 0.58 : isCamaro ? 0.72 : 0.54);
+    const grilleH = isSuv ? 0.26 : isCamaro ? 0.22 : isSports ? 0.18 : 0.22;
+    const grilleY = baseClearance + (isSuv ? 0.34 : isCamaro ? 0.33 : 0.24);
     const grilleFrame = new THREE.Mesh(
       cachedGeo(`gframe_${kind}`, () => new THREE.BoxGeometry(grilleW + 0.06, grilleH + 0.05, 0.08)),
-      isSports ? mats.carbonMat : mats.chromeMat,
+      isSports || isCamaro ? mats.carbonMat : mats.chromeMat,
     );
     grilleFrame.position.set(0, grilleY, L + 0.04);
     bodyGroup.add(grilleFrame);
@@ -1046,14 +1185,47 @@ export function createVehicle(
     grilleMesh.position.set(0, grilleY, L + 0.045);
     bodyGroup.add(grilleMesh);
 
-    // Chrome badge emblem on grille
-    const emblem = new THREE.Mesh(
-      cachedGeo('emblem', () => new THREE.CylinderGeometry(0.055, 0.055, 0.03, 10)),
-      mats.chromeMat,
-    );
-    emblem.rotation.x = Math.PI / 2;
-    emblem.position.set(0, grilleY + (isSports ? 0.12 : 0.0), L + 0.09);
-    bodyGroup.add(emblem);
+    if (isCamaro) {
+      // Lower wide black honeycomb intake + twin round recessed fog lamps
+      const lowerGrille = new THREE.Mesh(
+        cachedGeo('camaro_lowgrille', () => new THREE.BoxGeometry(w * 0.54, 0.14, 0.08)),
+        mats.trimMat,
+      );
+      lowerGrille.position.set(0, baseClearance + 0.11, L + 0.065);
+      bodyGroup.add(lowerGrille);
+
+      const goldMat = new THREE.MeshStandardMaterial({ color: 0xd4a017, roughness: 0.24, metalness: 0.85 });
+      const bowHoriz = new THREE.Mesh(cachedGeo('bowtie_h', () => new THREE.BoxGeometry(0.24, 0.055, 0.04)), goldMat);
+      bowHoriz.position.set(0, grilleY, L + 0.095);
+      const bowVert = new THREE.Mesh(cachedGeo('bowtie_v', () => new THREE.BoxGeometry(0.11, 0.095, 0.045)), goldMat);
+      bowVert.position.set(0, grilleY, L + 0.095);
+      bodyGroup.add(bowHoriz, bowVert);
+
+      for (const fx of [-spec.halfWidth * 0.62, spec.halfWidth * 0.62]) {
+        const fogRing = new THREE.Mesh(
+          cachedGeo('camaro_fog_ring', () => new THREE.CylinderGeometry(0.085, 0.085, 0.07, 12)),
+          mats.trimMat,
+        );
+        fogRing.rotation.x = Math.PI / 2;
+        fogRing.position.set(fx, baseClearance + 0.13, L + 0.04);
+        const fogBulb = new THREE.Mesh(
+          cachedGeo('camaro_fog_bulb', () => new THREE.CylinderGeometry(0.055, 0.055, 0.08, 10)),
+          mats.alloyMat,
+        );
+        fogBulb.rotation.x = Math.PI / 2;
+        fogBulb.position.set(fx, baseClearance + 0.13, L + 0.045);
+        bodyGroup.add(fogRing, fogBulb);
+      }
+    } else {
+      // Chrome badge emblem on grille
+      const emblem = new THREE.Mesh(
+        cachedGeo('emblem', () => new THREE.CylinderGeometry(0.055, 0.055, 0.03, 10)),
+        mats.chromeMat,
+      );
+      emblem.rotation.x = Math.PI / 2;
+      emblem.position.set(0, grilleY + (isSports ? 0.12 : 0.0), L + 0.09);
+      bodyGroup.add(emblem);
+    }
 
     // Rear Bumper + Diffuser + License Plate + Exhausts
     const rearBumper = new THREE.Mesh(getBumperGeometry(w * 0.96, isSuv ? 0.34 : 0.28, 0.22), paintMat);
@@ -1078,9 +1250,12 @@ export function createVehicle(
     plate.position.set(0, baseClearance + (isSuv ? 0.36 : 0.28), -L - 0.075);
     bodyGroup.add(plate);
 
-    // Chrome Exhaust Tips (Quad on Sports, Dual on Sedan/SUV/Police)
-    const pipeGeo = cachedGeo('exhaust_tip', () => new THREE.CylinderGeometry(0.052, 0.052, 0.18, 10));
-    const pipeOffsets = isSports ? [-0.58, -0.44, 0.44, 0.58] : [-0.54, 0.54];
+    // Chrome Exhaust Tips (Quad on Sports, Large Dual on Camaro, Dual on Sedan/SUV/Police)
+    const pipeGeo = cachedGeo(
+      isCamaro ? 'exhaust_tip_camaro' : 'exhaust_tip',
+      () => new THREE.CylinderGeometry(isCamaro ? 0.072 : 0.052, isCamaro ? 0.072 : 0.052, 0.18, 12),
+    );
+    const pipeOffsets = isSports ? [-0.58, -0.44, 0.44, 0.58] : isCamaro ? [-0.62, 0.62] : [-0.54, 0.54];
     for (const ex of pipeOffsets) {
       const pipe = new THREE.Mesh(pipeGeo, mats.chromeMat);
       pipe.rotation.x = Math.PI / 2;
@@ -1088,7 +1263,7 @@ export function createVehicle(
       bodyGroup.add(pipe);
     }
 
-    // 6. Interior Cockpit (Visible through Transparent Tinted Windows!)
+    // 6. Interior Cockpit (Visible through Transparent Tinted Windows & Interior Cockpit Camera!)
     const cabinFloorY = baseClearance + 0.18;
     const seatGeo = cachedGeo('car_seat', () => new THREE.BoxGeometry(0.46, 0.52, 0.44));
     const headrestGeo = cachedGeo('car_headrest', () => new THREE.BoxGeometry(0.24, 0.18, 0.12));
@@ -1111,13 +1286,25 @@ export function createVehicle(
     rearBench.rotation.x = -0.14;
     bodyGroup.add(rearBench);
 
-    // Dashboard & Center Console
+    // Dashboard, Illuminated Gauge Cluster & Center Console (framed cleanly in Cockpit Camera)
     const dash = new THREE.Mesh(
       cachedGeo(`dash_${kind}`, () => new THREE.BoxGeometry(cabHalfW * 1.85, 0.26, 0.42)),
       mats.interiorMat,
     );
     dash.position.set(0, beltY - 0.04, 0.48);
     bodyGroup.add(dash);
+
+    const gaugePod = new THREE.Mesh(
+      cachedGeo('gauge_pod', () => new THREE.BoxGeometry(0.32, 0.11, 0.05)),
+      new THREE.MeshStandardMaterial({
+        color: 0x0f172a,
+        emissive: 0x38bdf8,
+        emissiveIntensity: 0.75,
+        roughness: 0.3,
+      }),
+    );
+    gaugePod.position.set(0.42, beltY + 0.07, 0.44);
+    bodyGroup.add(gaugePod);
 
     const consoleMesh = new THREE.Mesh(
       cachedGeo('console', () => new THREE.BoxGeometry(0.24, 0.22, 1.1)),
@@ -1136,10 +1323,10 @@ export function createVehicle(
     bodyGroup.add(steerWheel);
 
     // 7. Tapered Upper Greenhouse: Sculpted Roof + Raked Windshield + Pillars + Transparent Glass
-    const cabinFrontZ = isSports ? 0.56 : isSuv ? 0.68 : 0.62;
-    const cabinRearZ = isSports ? -1.42 : isSuv ? -1.88 : -1.48;
-    const roofFrontZ = isSports ? 0.02 : isSuv ? 0.16 : 0.12;
-    const roofRearZ = isSports ? -0.92 : isSuv ? -1.68 : -0.98;
+    const cabinFrontZ = isSports || isCamaro ? 0.56 : isSuv ? 0.68 : 0.62;
+    const cabinRearZ = isCamaro ? -1.48 : isSports ? -1.42 : isSuv ? -1.88 : -1.48;
+    const roofFrontZ = isSports || isCamaro ? 0.02 : isSuv ? 0.16 : 0.12;
+    const roofRearZ = isSports || isCamaro ? -0.92 : isSuv ? -1.68 : -0.98;
     const roofLen = roofFrontZ - roofRearZ;
     const roofCenterZ = (roofFrontZ + roofRearZ) * 0.5;
     const roofW = cabHalfW * 1.94;
@@ -1269,8 +1456,41 @@ export function createVehicle(
       bodyGroup.add(mirrorFace);
     }
 
-    // 8. Class-Specific Exterior Details (Spoilers / Roof Rails / Police Gear)
-    if (isSports) {
+    if (isCamaro) {
+      // Sculpted Trunk Lip Spoiler + Twin Black Trunk Stripes + Gold Bowtie Emblem
+      const lipSpoiler = new THREE.Mesh(
+        cachedGeo('camaro_lip', () => new THREE.BoxGeometry(w * 0.86, 0.07, 0.22)),
+        paintMat,
+      );
+      lipSpoiler.position.set(0, beltY + 0.05, -L + 0.18);
+      lipSpoiler.rotation.x = -0.18;
+      lipSpoiler.castShadow = true;
+      bodyGroup.add(lipSpoiler);
+
+      for (const sx of [-0.26, 0.26]) {
+        const trunkStripe = new THREE.Mesh(
+          cachedGeo('camaro_trunk_stripe', () => new THREE.BoxGeometry(0.32, 0.025, 0.72)),
+          mats.trimMat,
+        );
+        trunkStripe.position.set(sx, beltY + 0.068, -L + 0.44);
+        trunkStripe.rotation.x = 0.05;
+        bodyGroup.add(trunkStripe);
+
+        const spoilerStripe = new THREE.Mesh(
+          cachedGeo('camaro_lip_stripe', () => new THREE.BoxGeometry(0.32, 0.02, 0.22)),
+          mats.trimMat,
+        );
+        spoilerStripe.position.set(sx, beltY + 0.088, -L + 0.17);
+        spoilerStripe.rotation.x = -0.18;
+        bodyGroup.add(spoilerStripe);
+      }
+      const goldRearMat = new THREE.MeshStandardMaterial({ color: 0xd4a017, roughness: 0.24, metalness: 0.85 });
+      const rearBowH = new THREE.Mesh(cachedGeo('rbow_h', () => new THREE.BoxGeometry(0.2, 0.05, 0.04)), goldRearMat);
+      rearBowH.position.set(0, beltY - 0.11, -L - 0.045);
+      const rearBowV = new THREE.Mesh(cachedGeo('rbow_v', () => new THREE.BoxGeometry(0.09, 0.085, 0.045)), goldRearMat);
+      rearBowV.position.set(0, beltY - 0.11, -L - 0.045);
+      bodyGroup.add(rearBowH, rearBowV);
+    } else if (isSports) {
       // Carbon Fiber GT Wing Spoiler on Twin Uprights
       const wingW = w * 0.92;
       const wingBlade = new THREE.Mesh(getWingBladeGeometry(wingW), mats.carbonMat);
@@ -1364,79 +1584,129 @@ export function createVehicle(
       bodyGroup.add(bluePod);
     }
 
-    // 9. Functional Automotive Lighting Clusters (Headlights + DRLs + Taillights + Brake + Reverse + Turn Signals)
-    const fLightY = grilleY + (isSports ? 0.06 : 0.04);
+    // 9. Functional Automotive Lighting Clusters (Headlights + Halo Rings + Taillights + Brake + Reverse + Turn Signals)
+    const fLightY = grilleY + (isCamaro ? 0.01 : isSports ? 0.06 : 0.04);
     const rLightY = beltY - 0.1;
 
     for (const side of [-1, 1]) {
       const lx = side * spec.halfWidth * 0.68;
       const turnMat = side > 0 ? turnLeftMat : turnRightMat;
 
-      // Headlight Housing + Projector Lens + DRL Accent Strip
-      const hlHousing = new THREE.Mesh(
-        cachedGeo('hl_housing', () => new THREE.BoxGeometry(0.38, 0.14, 0.12)),
-        mats.trimMat,
-      );
-      hlHousing.position.set(lx, fLightY, L - 0.01);
-      hlHousing.rotation.y = side * -0.14;
-      bodyGroup.add(hlHousing);
+      if (isCamaro) {
+        // Signature Camaro Halo-Ring Projector Headlights
+        const haloRing = new THREE.Mesh(
+          cachedGeo('camaro_halo', () => new THREE.TorusGeometry(0.088, 0.016, 6, 16)),
+          new THREE.MeshStandardMaterial({ color: 0xffedd5, emissive: 0xf97316, emissiveIntensity: 1.5 }),
+        );
+        haloRing.position.set(lx, fLightY, L + 0.068);
+        haloRing.rotation.y = side * -0.14;
+        bodyGroup.add(haloRing);
 
-      const hlLens = new THREE.Mesh(
-        cachedGeo('hl_lens', () => new THREE.BoxGeometry(0.32, 0.09, 0.06)),
-        headlightMat,
-      );
-      hlLens.position.set(lx, fLightY + 0.01, L + 0.03);
-      hlLens.rotation.y = side * -0.14;
-      bodyGroup.add(hlLens);
+        const projector = new THREE.Mesh(
+          cachedGeo('camaro_proj', () => new THREE.CylinderGeometry(0.058, 0.058, 0.05, 12)),
+          headlightMat,
+        );
+        projector.rotation.x = Math.PI / 2;
+        projector.position.set(lx, fLightY, L + 0.065);
+        bodyGroup.add(projector);
 
-      // Front Outer Amber Turn Signal
-      const fTurn = new THREE.Mesh(
-        cachedGeo('fturn', () => new THREE.BoxGeometry(0.11, 0.045, 0.06)),
-        turnMat,
-      );
-      fTurn.position.set(lx + side * 0.14, fLightY - 0.045, L + 0.01);
-      fTurn.rotation.y = side * -0.22;
-      bodyGroup.add(fTurn);
+        // Quad Square Camaro Taillights (2 distinct pods per side!)
+        for (const qOff of [-0.14, 0.12]) {
+          const quadBox = new THREE.Mesh(
+            cachedGeo('camaro_quad_tl', () => new THREE.BoxGeometry(0.19, 0.14, 0.07)),
+            taillightMat,
+          );
+          quadBox.position.set(lx + side * qOff, rLightY - 0.01, -L - 0.025);
+          quadBox.rotation.y = side * 0.08;
+          bodyGroup.add(quadBox);
+        }
+        const camBrake = new THREE.Mesh(
+          cachedGeo('camaro_brake', () => new THREE.BoxGeometry(0.14, 0.07, 0.072)),
+          brakeLightMat,
+        );
+        camBrake.position.set(lx - side * 0.14, rLightY - 0.01, -L - 0.028);
+        bodyGroup.add(camBrake);
 
-      // Rear LED Taillight Bar + Dedicated Brake Module + Reverse White Module + Amber Blinker
-      const tlHousing = new THREE.Mesh(
-        cachedGeo('tl_housing', () => new THREE.BoxGeometry(0.44, 0.15, 0.1)),
-        mats.trimMat,
-      );
-      tlHousing.position.set(lx, rLightY, -L + 0.02);
-      tlHousing.rotation.y = side * 0.1;
-      bodyGroup.add(tlHousing);
+        const camRev = new THREE.Mesh(
+          cachedGeo('camaro_rev', () => new THREE.BoxGeometry(0.08, 0.045, 0.072)),
+          reverseLightMat,
+        );
+        camRev.position.set(lx - side * 0.14, rLightY - 0.06, -L - 0.028);
+        bodyGroup.add(camRev);
 
-      const tlBar = new THREE.Mesh(
-        cachedGeo('tl_bar', () => new THREE.BoxGeometry(0.38, 0.05, 0.05)),
-        taillightMat,
-      );
-      tlBar.position.set(lx, rLightY + 0.035, -L - 0.015);
-      tlBar.rotation.y = side * 0.1;
-      bodyGroup.add(tlBar);
+        const camTurn = new THREE.Mesh(
+          cachedGeo('camaro_turn', () => new THREE.BoxGeometry(0.09, 0.045, 0.072)),
+          turnMat,
+        );
+        camTurn.position.set(lx + side * 0.14, rLightY - 0.06, -L - 0.028);
+        bodyGroup.add(camTurn);
+      } else {
+        // Headlight Housing + Projector Lens + DRL Accent Strip
+        const hlHousing = new THREE.Mesh(
+          cachedGeo('hl_housing', () => new THREE.BoxGeometry(0.38, 0.14, 0.12)),
+          mats.trimMat,
+        );
+        hlHousing.position.set(lx, fLightY, L - 0.01);
+        hlHousing.rotation.y = side * -0.14;
+        bodyGroup.add(hlHousing);
 
-      const brakeModule = new THREE.Mesh(
-        cachedGeo('brake_mod', () => new THREE.BoxGeometry(0.18, 0.055, 0.055)),
-        brakeLightMat,
-      );
-      brakeModule.position.set(lx - side * 0.01, rLightY - 0.025, -L - 0.015);
-      brakeModule.rotation.y = side * 0.1;
-      bodyGroup.add(brakeModule);
+        const hlLens = new THREE.Mesh(
+          cachedGeo('hl_lens', () => new THREE.BoxGeometry(0.32, 0.09, 0.06)),
+          headlightMat,
+        );
+        hlLens.position.set(lx, fLightY + 0.01, L + 0.03);
+        hlLens.rotation.y = side * -0.14;
+        bodyGroup.add(hlLens);
 
-      const revLens = new THREE.Mesh(
-        cachedGeo('rev_lens', () => new THREE.BoxGeometry(0.09, 0.048, 0.055)),
-        reverseLightMat,
-      );
-      revLens.position.set(lx - side * 0.16, rLightY - 0.025, -L - 0.016);
-      bodyGroup.add(revLens);
+        // Front Outer Amber Turn Signal
+        const fTurn = new THREE.Mesh(
+          cachedGeo('fturn', () => new THREE.BoxGeometry(0.11, 0.045, 0.06)),
+          turnMat,
+        );
+        fTurn.position.set(lx + side * 0.14, fLightY - 0.045, L + 0.01);
+        fTurn.rotation.y = side * -0.22;
+        bodyGroup.add(fTurn);
 
-      const rTurn = new THREE.Mesh(
-        cachedGeo('rturn', () => new THREE.BoxGeometry(0.11, 0.05, 0.055)),
-        turnMat,
-      );
-      rTurn.position.set(lx + side * 0.15, rLightY - 0.025, -L - 0.014);
-      rTurn.rotation.y = side * 0.14;
-      bodyGroup.add(rTurn);
+        // Rear LED Taillight Bar + Dedicated Brake Module + Reverse White Module + Amber Blinker
+        const tlHousing = new THREE.Mesh(
+          cachedGeo('tl_housing', () => new THREE.BoxGeometry(0.44, 0.15, 0.1)),
+          mats.trimMat,
+        );
+        tlHousing.position.set(lx, rLightY, -L + 0.02);
+        tlHousing.rotation.y = side * 0.1;
+        bodyGroup.add(tlHousing);
+
+        const tlBar = new THREE.Mesh(
+          cachedGeo('tl_bar', () => new THREE.BoxGeometry(0.38, 0.05, 0.05)),
+          taillightMat,
+        );
+        tlBar.position.set(lx, rLightY + 0.035, -L - 0.015);
+        tlBar.rotation.y = side * 0.1;
+        bodyGroup.add(tlBar);
+
+        const brakeModule = new THREE.Mesh(
+          cachedGeo('brake_mod', () => new THREE.BoxGeometry(0.18, 0.055, 0.055)),
+          brakeLightMat,
+        );
+        brakeModule.position.set(lx - side * 0.01, rLightY - 0.025, -L - 0.015);
+        brakeModule.rotation.y = side * 0.1;
+        bodyGroup.add(brakeModule);
+
+        const revLens = new THREE.Mesh(
+          cachedGeo('rev_lens', () => new THREE.BoxGeometry(0.09, 0.048, 0.055)),
+          reverseLightMat,
+        );
+        revLens.position.set(lx - side * 0.16, rLightY - 0.025, -L - 0.016);
+        bodyGroup.add(revLens);
+
+        const rTurn = new THREE.Mesh(
+          cachedGeo('rturn', () => new THREE.BoxGeometry(0.11, 0.05, 0.055)),
+          turnMat,
+        );
+        rTurn.position.set(lx + side * 0.15, rLightY - 0.025, -L - 0.014);
+        rTurn.rotation.y = side * 0.14;
+        bodyGroup.add(rTurn);
+      }
     }
 
     // Center High-Mounted 3rd Brake Light (CHMSL)
@@ -1448,11 +1718,26 @@ export function createVehicle(
     bodyGroup.add(chmsl);
   }
 
+  const catalogMap: Record<VehicleKind, string> = {
+    camaro: 'camaro_ss',
+    mustang: 'mustang_gt',
+    challenger: 'dodge_challenger_lb',
+    sports: 'lexus_lc500',
+    sedan: 'sultan_sedan',
+    suv: 'granger_suv',
+    van: 'speedo_cargo',
+    moto: 'bati_801',
+    police: 'lspd_cruiser',
+  };
+
   return {
     id,
+    catalogId: catalogMap[kind] ?? 'camaro_ss',
+    paintColor,
     spec,
     group,
     bodyGroup,
+    driverGroup,
     wheelNodes,
     wheelMeshes,
     frontSteerPivots,
@@ -1498,6 +1783,59 @@ export function createVehicle(
     aiDir: 1,
     aiLaneCoord: 0,
     aiTargetSpeed: 12,
+    aiTurnCooldown: 4,
+    collisionStunTimer: 0,
+    hornCooldown: 0,
+  };
+}
+
+export function applyGltfTemplateToVehicle(
+  v: VehicleInstance,
+  loader: VehicleAssetLoader,
+  template: VehicleModelTemplate,
+  customModelUrl?: string,
+): void {
+  const cloned = loader.cloneTemplateInstance(template);
+  // Keep only the ground contact shadow on group; swap bodyGroup + wheels
+  const toRemove: THREE.Object3D[] = [];
+  for (const child of v.group.children) {
+    if (child === v.bodyGroup || v.frontSteerPivots.includes(child) || v.wheelNodes.some((w) => w.pivot === child)) {
+      toRemove.push(child);
+    }
+  }
+  for (const rm of toRemove) {
+    v.group.remove(rm);
+  }
+
+  v.bodyGroup = new THREE.Group();
+  v.bodyGroup.add(cloned.root);
+  v.group.add(v.bodyGroup);
+
+  // Move wheel pivots directly onto v.group so chassis suspension pitch/roll never displaces tires
+  for (const w of cloned.wheels) {
+    v.group.add(w.pivot);
+  }
+
+  // Re-attach seated driver silhouette inside the new GLTF bodyGroup
+  v.bodyGroup.add(v.driverGroup);
+
+  v.wheelNodes = cloned.wheels.map((w: NormalizedWheelTemplate) => ({
+    pivot: w.pivot,
+    spinMesh: w.spinMesh,
+    localX: w.localX,
+    localZ: w.localZ,
+    restY: w.restY,
+    isFront: w.isFront,
+  }));
+  v.wheelMeshes = cloned.wheelMeshes;
+  v.frontSteerPivots = cloned.frontSteerPivots;
+  v.customModelUrl = customModelUrl ?? template.url;
+  v.spec = {
+    ...v.spec,
+    wheelRadius: template.wheelRadius,
+    halfWidth: template.halfWidth,
+    halfLength: template.halfLength,
+    height: template.height,
   };
 }
 
@@ -1510,6 +1848,7 @@ export function stepVehiclePhysics(
   isNight: boolean,
   elapsed: number,
   onImpact?: (impactSpeed: number, x: number, z: number) => void,
+  onGearShift?: () => void,
 ): void {
   const safeDt = Math.max(0.001, Math.min(dt, 0.033));
   const { spec } = v;
@@ -1530,6 +1869,7 @@ export function stepVehiclePhysics(
   if (nextGear > prevGear && input.throttle > 0.25 && localFwd > 2) {
     v.shiftTimer = 0.065;
     v.pitchVel += 0.28; // Subtle crisp gear-shift weight nod
+    onGearShift?.();
   }
   v.gear = nextGear;
   if (v.shiftTimer > 0) {
@@ -1549,19 +1889,31 @@ export function stepVehiclePhysics(
   const gearLeverage = 1.3 - ((v.gear - 1) / Math.max(1, spec.gears - 1)) * 0.44;
   const shiftCut = v.shiftTimer > 0 ? 0.35 : 1.0;
 
-  // Longitudinal Acceleration, Progressive Braking & Aerodynamic Drag
-  if (input.throttle > 0.05) {
+  const healthRatio = v.maxHealth > 0 ? v.health / v.maxHealth : 1;
+  const engineWearScale = healthRatio < 0.25 ? 0.68 : healthRatio < 0.45 ? 0.88 : 1.0;
+
+  // Longitudinal Acceleration, Progressive Braking, Dedicated Brake-Only & Reverse
+  if (input.brakeOnly) {
+    if (localFwd > 0.25) {
+      localFwd = Math.max(0, localFwd - spec.brake * 1.15 * safeDt);
+    } else if (localFwd < -0.25) {
+      localFwd = Math.min(0, localFwd + spec.brake * 1.15 * safeDt);
+    } else {
+      localFwd = 0;
+    }
+  } else if (input.throttle > 0.05) {
     if (localFwd < -0.7) {
       localFwd += spec.brake * 1.15 * safeDt;
     } else {
-      localFwd += input.throttle * spec.accel * torqueBand * gearLeverage * shiftCut * safeDt;
+      localFwd +=
+        input.throttle * spec.accel * engineWearScale * torqueBand * gearLeverage * shiftCut * safeDt;
     }
   } else if (input.throttle < -0.05) {
     if (localFwd > 0.7) {
       const brakeMod = 1 + 0.22 * (1 - speedNorm);
       localFwd -= spec.brake * brakeMod * safeDt;
     } else {
-      localFwd += input.throttle * (spec.accel * 0.58) * safeDt;
+      localFwd += input.throttle * (spec.accel * 0.58 * engineWearScale) * safeDt;
     }
   } else {
     localFwd *= Math.exp(-0.72 * safeDt);
@@ -1574,8 +1926,8 @@ export function stepVehiclePhysics(
     localFwd *= Math.exp(-2.6 * safeDt);
   }
 
-  const maxRev = -spec.maxSpeed * 0.44;
-  localFwd = THREE.MathUtils.clamp(localFwd, maxRev, spec.maxSpeed * 1.05);
+  const maxRev = -spec.maxSpeed * 0.44 * engineWearScale;
+  localFwd = THREE.MathUtils.clamp(localFwd, maxRev, spec.maxSpeed * 1.05 * engineWearScale);
 
   // 2. Speed-Sensitive Steering, Yaw Inertia & GTA-Style Drift Physics
   const steerLockScale = 1 / (1 + absFwd * 0.036);
@@ -1642,28 +1994,41 @@ export function stepVehiclePhysics(
   v.vz = newFwdZ * localFwd + newRightZ * localLat;
   v.forwardSpeed = localFwd;
 
-  v.x += v.vx * safeDt;
-  v.z += v.vz * safeDt;
+  // 3. Sub-stepped Multi-Circle Oriented Chassis & Vehicle Collisions (prevents wall/bumper tunneling)
+  const stepDist = Math.hypot(v.vx, v.vz) * safeDt;
+  const substeps = Math.min(4, Math.max(1, Math.ceil(stepDist / 0.35)));
+  const subDt = safeDt / substeps;
+  const colRadius = spec.halfWidth * 0.96;
+  const hullSpan = Math.max(0.1, spec.halfLength - colRadius);
+  const offsetsZ = spec.kind === 'moto' ? [-hullSpan * 0.8, hullSpan * 0.8] : [-hullSpan, 0, hullSpan];
 
-  // 3. World & Vehicle Collisions
-  const posTmp = { x: v.x, z: v.z };
-  const colRadius = spec.halfWidth * 1.05;
-  const colRes = resolveCircleWorldCollisions(posTmp, colRadius, colliders);
-  if (colRes.collided) {
-    v.x = posTmp.x;
-    v.z = posTmp.z;
-    const vn = v.vx * colRes.normalX + v.vz * colRes.normalZ;
-    if (vn < 0) {
-      const impact = -vn;
-      v.vx -= 1.32 * vn * colRes.normalX;
-      v.vz -= 1.32 * vn * colRes.normalZ;
-      v.vx *= 0.78;
-      v.vz *= 0.78;
-      v.suspVel -= Math.min(1.6, impact * 0.08);
-      v.pitchVel += (colRes.normalX * newFwdX + colRes.normalZ * newFwdZ) * Math.min(1.8, impact * 0.12);
-      if (impact > 4.5) {
-        v.health = Math.max(0, v.health - impact * 1.4);
-        onImpact?.(impact, v.x, v.z);
+  for (let s = 0; s < substeps; s++) {
+    v.x += v.vx * subDt;
+    v.z += v.vz * subDt;
+
+    for (let oi = 0; oi < offsetsZ.length; oi++) {
+      const oz = offsetsZ[oi];
+      const cx = v.x + newFwdX * oz;
+      const cz = v.z + newFwdZ * oz;
+      const posTmp = { x: cx, z: cz };
+      const colRes = resolveCircleWorldCollisions(posTmp, colRadius, colliders);
+      if (colRes.collided) {
+        v.x += posTmp.x - cx;
+        v.z += posTmp.z - cz;
+        const vn = v.vx * colRes.normalX + v.vz * colRes.normalZ;
+        if (vn < 0) {
+          const impact = -vn;
+          v.vx -= 1.32 * vn * colRes.normalX;
+          v.vz -= 1.32 * vn * colRes.normalZ;
+          v.vx *= 0.78;
+          v.vz *= 0.78;
+          v.suspVel -= Math.min(1.6, impact * 0.08);
+          v.pitchVel += (colRes.normalX * newFwdX + colRes.normalZ * newFwdZ) * Math.min(1.8, impact * 0.12);
+          if (impact > 4.5 && s === 0) {
+            v.health = Math.max(0, v.health - impact * 1.4);
+            onImpact?.(impact, posTmp.x, posTmp.z);
+          }
+        }
       }
     }
   }
@@ -1671,14 +2036,39 @@ export function stepVehiclePhysics(
   for (let i = 0; i < allVehicles.length; i++) {
     const other = allVehicles[i];
     if (other === v) continue;
-    const dx = v.x - other.x;
-    const dz = v.z - other.z;
-    const minDist = spec.halfWidth + other.spec.halfWidth + 0.35;
-    const distSq = dx * dx + dz * dz;
-    if (distSq < minDist * minDist && distSq > 1e-5) {
-      const dist = Math.sqrt(distSq);
-      const nx = dx / dist;
-      const nz = dz / dist;
+    const oFwdX = Math.sin(other.heading);
+    const oFwdZ = Math.cos(other.heading);
+    const oSpan = Math.max(0.1, other.spec.halfLength - other.spec.halfWidth * 0.96);
+    const myPoints = spec.kind === 'moto' ? [0] : [-hullSpan * 0.85, 0, hullSpan * 0.85];
+    const otherPoints = other.spec.kind === 'moto' ? [0] : [-oSpan * 0.85, 0, oSpan * 0.85];
+
+    let bestDistSq = Infinity;
+    let bestDx = 0;
+    let bestDz = 0;
+    const minDist = spec.halfWidth + other.spec.halfWidth + 0.15;
+    const minDistSq = minDist * minDist;
+
+    for (let a = 0; a < myPoints.length; a++) {
+      const ax = v.x + newFwdX * myPoints[a];
+      const az = v.z + newFwdZ * myPoints[a];
+      for (let b = 0; b < otherPoints.length; b++) {
+        const bx = other.x + oFwdX * otherPoints[b];
+        const bz = other.z + oFwdZ * otherPoints[b];
+        const dx = ax - bx;
+        const dz = az - bz;
+        const dSq = dx * dx + dz * dz;
+        if (dSq < bestDistSq) {
+          bestDistSq = dSq;
+          bestDx = dx;
+          bestDz = dz;
+        }
+      }
+    }
+
+    if (bestDistSq < minDistSq && bestDistSq > 1e-5) {
+      const dist = Math.sqrt(bestDistSq);
+      const nx = bestDx / dist;
+      const nz = bestDz / dist;
       const overlap = minDist - dist;
 
       const totalMass = spec.mass + other.spec.mass;
@@ -1813,10 +2203,10 @@ export function stepVehiclePhysics(
   v.headlightMat.emissiveIntensity = isNight ? 2.6 : v.occupiedByPlayer ? 1.05 : 0.35;
   v.taillightMat.emissiveIntensity = isNight ? 1.35 : v.occupiedByPlayer ? 0.55 : 0.25;
 
-  const braking = (input.throttle < -0.1 && localFwd > 0.5) || input.handbrake;
+  const braking = Boolean(input.brakeOnly) || (input.throttle < -0.1 && localFwd > 0.5) || input.handbrake;
   v.brakeLightMat.emissiveIntensity = braking ? 3.5 : isNight ? 0.45 : 0.08;
 
-  const reversing = localFwd < -0.45 && input.throttle < -0.1;
+  const reversing = !input.brakeOnly && localFwd < -0.45 && input.throttle < -0.1;
   v.reverseLightMat.emissiveIntensity = reversing ? 2.8 : 0.04;
 
   const blinkOn = Math.sin(elapsed * 9.0) > 0;
@@ -1844,34 +2234,69 @@ export function stepTrafficAI(
   colliders: WorldBoxCollider[],
   isNight: boolean,
   elapsed: number,
+  onNearHorn?: () => void,
+  onImpact?: (impactSpeed: number, x: number, z: number) => void,
 ): void {
   if (!v.aiActive || v.occupiedByPlayer) return;
 
-  let shouldStop = false;
-  const distToPlayer = Math.hypot(v.x - playerPos.x, v.z - playerPos.z);
-  if (distToPlayer < 11) {
-    const fwdX = Math.sin(v.heading);
-    const fwdZ = Math.cos(v.heading);
-    const dot = (playerPos.x - v.x) * fwdX + (playerPos.z - v.z) * fwdZ;
-    if (dot > 1.5 && dot < 10.5) {
+  const dxPlayer = playerPos.x - v.x;
+  const dzPlayer = playerPos.z - v.z;
+  const distSqToPlayer = dxPlayer * dxPlayer + dzPlayer * dzPlayer;
+
+  if (v.aiTurnCooldown !== undefined && v.aiTurnCooldown > 0) {
+    v.aiTurnCooldown = Math.max(0, v.aiTurnCooldown - dt);
+  }
+  if (v.hornCooldown !== undefined && v.hornCooldown > 0) {
+    v.hornCooldown = Math.max(0, v.hornCooldown - dt);
+  }
+  if (v.collisionStunTimer !== undefined && v.collisionStunTimer > 0) {
+    v.collisionStunTimer = Math.max(0, v.collisionStunTimer - dt);
+  }
+
+  // Android LOD: simplified cruise update for traffic far outside city action radius
+  if (distSqToPlayer > 175 * 175) {
+    const fwdXFar = Math.sin(v.heading);
+    const fwdZFar = Math.cos(v.heading);
+    v.x += fwdXFar * v.aiTargetSpeed * 0.65 * dt;
+    v.z += fwdZFar * v.aiTargetSpeed * 0.65 * dt;
+    if (v.z > 135) v.z = -135;
+    if (v.z < -135) v.z = 135;
+    if (v.x > 128) v.x = -128;
+    if (v.x < -135) v.x = 128;
+    v.group.position.set(v.x, v.y, v.z);
+    return;
+  }
+
+  let shouldStop = (v.collisionStunTimer ?? 0) > 0;
+  const fwdX = Math.sin(v.heading);
+  const fwdZ = Math.cos(v.heading);
+
+  if (!shouldStop && distSqToPlayer < 13 * 13) {
+    const dot = dxPlayer * fwdX + dzPlayer * fwdZ;
+    const lat = Math.abs(dxPlayer * fwdZ - dzPlayer * fwdX);
+    if (dot > 1.2 && dot < 11.5 && lat < 2.6) {
       shouldStop = true;
+      if ((v.hornCooldown ?? 0) <= 0 && dot < 9.0 && Math.abs(v.forwardSpeed) > 1.5) {
+        v.hornCooldown = 4.2 + Math.random() * 2.5;
+        onNearHorn?.();
+      }
     }
   }
 
-  const fwdX = Math.sin(v.heading);
-  const fwdZ = Math.cos(v.heading);
-  for (let i = 0; i < allVehicles.length; i++) {
-    const other = allVehicles[i];
-    if (other === v) continue;
-    const dx = other.x - v.x;
-    const dz = other.z - v.z;
-    const dSq = dx * dx + dz * dz;
-    if (dSq < 144) {
-      const proj = dx * fwdX + dz * fwdZ;
-      const lat = Math.abs(dx * fwdZ - dz * fwdX);
-      if (proj > 1.5 && proj < 11 && lat < 2.3) {
-        shouldStop = true;
-        break;
+  if (!shouldStop) {
+    for (let i = 0; i < allVehicles.length; i++) {
+      const other = allVehicles[i];
+      if (other === v) continue;
+      const dx = other.x - v.x;
+      const dz = other.z - v.z;
+      const dSq = dx * dx + dz * dz;
+      if (dSq < 150) {
+        const proj = dx * fwdX + dz * fwdZ;
+        const lat = Math.abs(dx * fwdZ - dz * fwdX);
+        if (proj > 1.4 && proj < 11.5 && lat < 2.35) {
+          shouldStop = true;
+          break;
+        }
       }
     }
   }
@@ -1882,8 +2307,24 @@ export function stepTrafficAI(
     if (!green) {
       for (const ic of ROAD_COORDS) {
         const distToStop = (ic - v.aiDir * 9.5 - coord) * v.aiDir;
-        if (distToStop > 0 && distToStop < 6.5) {
+        if (distToStop > 0 && distToStop < 6.8) {
           shouldStop = true;
+          break;
+        }
+      }
+    } else if ((v.aiTurnCooldown ?? 0) <= 0) {
+      // At green intersections, occasionally turn onto the cross-avenue
+      for (const ic of ROAD_COORDS) {
+        if (Math.abs(ic) > 95) continue;
+        const distToCenter = Math.abs(coord - ic);
+        const crossCoord = v.aiAxis === 'z' ? v.x : v.z;
+        const nearAnyCross = Math.abs(crossCoord - Math.round(crossCoord / 60) * 60) < 6;
+        if (distToCenter < 2.4 && nearAnyCross && Math.random() < 0.28) {
+          const turnSign: 1 | -1 = Math.random() < 0.5 ? 1 : -1;
+          v.aiAxis = v.aiAxis === 'z' ? 'x' : 'z';
+          v.aiDir = turnSign;
+          v.aiLaneCoord = ic + (turnSign === 1 ? -3.4 : 3.4);
+          v.aiTurnCooldown = 5.5;
           break;
         }
       }
@@ -1907,7 +2348,7 @@ export function stepTrafficAI(
   const laneSteer = v.aiAxis === 'z' ? laneOffset * v.aiDir * 0.12 : -laneOffset * v.aiDir * 0.12;
   const steer = THREE.MathUtils.clamp(headingErr * 1.8 + laneSteer, -1, 1);
 
-  const throttle = shouldStop ? -0.8 : v.forwardSpeed < v.aiTargetSpeed ? 0.55 : 0;
+  const throttle = shouldStop ? -0.82 : v.forwardSpeed < v.aiTargetSpeed ? 0.56 : 0;
 
   stepVehiclePhysics(
     v,
@@ -1917,6 +2358,12 @@ export function stepTrafficAI(
     allVehicles,
     isNight,
     elapsed,
+    (impact, ix, iz) => {
+      if (impact > 5.0) {
+        v.collisionStunTimer = 1.9;
+        onImpact?.(impact, ix, iz);
+      }
+    },
   );
 
   if (v.z > 135) v.z = -135;

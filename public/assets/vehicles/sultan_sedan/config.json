@@ -1,0 +1,14 @@
+{
+  "id": "sultan_sedan",
+  "kind": "sedan",
+  "name": "Sultan Sedan",
+  "category": "Berlina Urbana",
+  "description": "Berlina equilibrada de 4 portas para condução estável na cidade.",
+  "defaultColor": "#2563eb",
+  "previewUrl": null,
+  "modelUrl": null,
+  "orientationOffsetY": 0,
+  "targetLength": 4.4,
+  "cockpitOffset": { "x": 0.42, "y": 1.15, "z": 0.05 },
+  "wheelNames": ["wheel", "roda", "tire", "rim"]
+}
